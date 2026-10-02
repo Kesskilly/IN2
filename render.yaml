@@ -1,1 +1,13 @@
-
+services:
+  - type: web
+    name: in2u
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        value: "*"
