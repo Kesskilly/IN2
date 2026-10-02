@@ -79,4 +79,8 @@ app.get('/api/feed',auth,(req,res)=>{
 app.post('/api/posts/:id/reactions',auth,(req,res)=>{const emoji=String(req.body?.emoji||'❤️');db.prepare('INSERT INTO reactions(user_id,post_id,emoji) VALUES(?,?,?) ON CONFLICT(user_id,post_id) DO UPDATE SET emoji=excluded.emoji').run(req.userId,Number(req.params.id),emoji);res.json({ok:true})});
 app.post('/api/posts/:id/comments',auth,(req,res)=>{const text=String(req.body?.text||'').trim();if(!text)return res.status(400).json({error:'Comment is required'});const info=db.prepare('INSERT INTO comments(post_id,user_id,parent_id,text) VALUES(?,?,?,?)').run(Number(req.params.id),req.userId,req.body?.parentId||null,text);res.status(201).json({id:info.lastInsertRowid})});
 
-app.listen(process.env.PORT||3000,()=>console.log(`In2U backend running on http://localhost:${process.env.PORT||3000}`));
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`In2U backend running on port ${PORT}`);
+});
