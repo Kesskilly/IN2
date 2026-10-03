@@ -6,18 +6,22 @@ import jwt from 'jsonwebtoken';
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const db = new Database(path.join(__dirname, 'in2u.db'));
 
 db.pragma('foreign_keys = ON');
-db.exec(
-  (await import('node:fs/promises')).readFile(
-    path.join(__dirname, 'schema.sql'),
-    'utf8'
-  )
-);
+
+const schemaPath = path.join(__dirname, 'schema.sql');
+const schemaSql = await readFile(schemaPath, 'utf8');
+
+if (typeof schemaSql !== 'string') {
+  throw new Error('schema.sql could not be read as text');
+}
+
+db.exec(schemaSql);
 
 const configuredOrigins = String(process.env.CORS_ORIGIN || '*')
   .split(',')
