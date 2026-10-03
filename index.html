@@ -338,7 +338,111 @@ function commentHTML(c,pid){return `<div class="comment"><div class="commentbody
 function setReply(pid,cid){replyTarget={pid,cid};document.getElementById('commentInput').placeholder='Reply to this comment...';document.getElementById('commentInput').focus();showToast('Replying to comment')}
 async function addComment(){const input=document.getElementById('commentInput'),text=input.value.trim();if(!text)return;try{await api('/api/posts/'+currentCommentPost+'/comments',{method:'POST',body:JSON.stringify({text,parentId:replyTarget?.cid||null})});input.value='';replyTarget=null;input.placeholder='Add a thoughtful comment...';await loadFeedFromApi();const p=data.posts.find(x=>x.id===currentCommentPost);document.getElementById('commentsList').innerHTML=commentsHTML(p);showToast('Comment posted ✨')}catch(err){showToast(err.message)}}
 function reactComment(pid,cid,e){const c=data.posts.find(x=>x.id===pid).comments.find(x=>x.id===cid);c.reactions=c.reactions||{};c.reactions[e]=(c.reactions[e]||0)+1;save();document.getElementById('commentsList').innerHTML=commentsHTML(data.posts.find(x=>x.id===pid));showToast(`${e} added to comment`)}
-function reactReply(pid,cid,rid,e){const c=data.posts.find(x=>x.id===pid).comments.find(x=>x.id===cid);const r=c.replies.find(x=>x.id===rid);r.reactions=r.reactions||{};r.reactions[e]=(r.reactions[e]||0)+1;save();document.getElementById('commentsList').innerHTML=commentsHTML(data.posts.find(x=>x.id===pid))}
+async function createPost() {
+  const t =
+    document.getElementById('postText')
+      .value
+      .trim();
+
+  if (!t && !pendingMedia.length) {
+    return showToast(
+      'Add a caption, photo or video first'
+    );
+  }
+
+  const mediaFiles = [...pendingMedia];
+  const uploadedUrls = [];
+
+  try {
+    const status =
+      document.getElementById('photoStatus');
+
+    if (status) {
+      status.textContent =
+        mediaFiles.length
+          ? 'Uploading media…'
+          : 'Creating post…';
+    }
+
+    for (let i = 0; i < mediaFiles.length; i++) {
+      const fileData = mediaFiles[i];
+
+      const isVideo =
+        String(fileData).startsWith('data:video/');
+
+      const uploadResponse =
+        await api('/api/upload', {
+          method: 'POST',
+          body: JSON.stringify({
+            file: fileData,
+            resource_type:
+              isVideo ? 'video' : 'image'
+          })
+        });
+
+      if (!uploadResponse?.url) {
+        throw new Error(
+          'Cloudinary did not return a media URL'
+        );
+      }
+
+      uploadedUrls.push(
+        uploadResponse.url
+      );
+
+      if (status) {
+        status.textContent =
+          `Uploading ${i + 1}/${mediaFiles.length}…`;
+      }
+    }
+
+    await api('/api/posts', {
+      method: 'POST',
+      body: JSON.stringify({
+        caption: t,
+        media: uploadedUrls
+      })
+    });
+
+    document.getElementById(
+      'postText'
+    ).value = '';
+
+    clearPhoto();
+
+    await loadFeedFromApi();
+
+    showScreen('home');
+
+    showToast(
+      uploadedUrls.length
+        ? `${uploadedUrls.length} media file${
+            uploadedUrls.length > 1 ? 's' : ''
+          } shared ✨`
+        : 'Posted to In2U ✨'
+    );
+
+  } catch (err) {
+    console.error(
+      'Create post error:',
+      err
+    );
+
+    showToast(
+      err.message ||
+      'Could not upload your media'
+    );
+
+    const status =
+      document.getElementById('photoStatus');
+
+    if (status) {
+      status.textContent =
+        'Upload failed — try again';
+    }
+  }
+  }
+  function reactReply(pid,cid,rid,e){const c=data.posts.find(x=>x.id===pid).comments.find(x=>x.id===cid);const r=c.replies.find(x=>x.id===rid);r.reactions=r.reactions||{};r.reactions[e]=(r.reactions[e]||0)+1;save();document.getElementById('commentsList').innerHTML=commentsHTML(data.posts.find(x=>x.id===pid))}
 function sharePost(){navigator.clipboard?.writeText('Check this out on In2U!').catch(()=>{});showToast('Post link copied ↗')}
 let pendingImages=[];
 let pendingMedia=[];
