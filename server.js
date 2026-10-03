@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
-const cloudinary = require('cloudinary').v2;
+import { v2 as cloudinary } from 'cloudinary';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -51,7 +51,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '40mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 const JWT_SECRET =
@@ -520,6 +520,68 @@ app.post('/api/posts', auth, (req, res) => {
 });
 
 app.get('/api/feed', auth, (req, res) => {
+  app.post('/api/upload', auth, async (req, res) => {
+  try {
+    const {
+      file,
+      resource_type = 'auto'
+    } = req.body || {};
+
+    if (!file) {
+      return res.status(400).json({
+        error: 'No file provided'
+      });
+    }
+
+    if (
+      typeof file !== 'string' ||
+      !file.startsWith('data:')
+    ) {
+      return res.status(400).json({
+        error: 'Invalid file format'
+      });
+    }
+
+    const allowedTypes = [
+      'image',
+      'video',
+      'auto'
+    ];
+
+    if (!allowedTypes.includes(resource_type)) {
+      return res.status(400).json({
+        error: 'Invalid resource type'
+      });
+    }
+
+    const result =
+      await cloudinary.uploader.upload(file, {
+        folder: 'in2u',
+        resource_type
+      });
+
+    return res.status(201).json({
+      ok: true,
+      url: result.secure_url,
+      public_id: result.public_id,
+      resource_type: result.resource_type,
+      format: result.format,
+      bytes: result.bytes
+    });
+
+  } catch (error) {
+    console.error(
+      'Cloudinary upload error:',
+      error
+    );
+
+    return res.status(500).json({
+      error:
+        error?.message ||
+        'Media upload failed'
+    });
+  }
+});
   const rows = db
     .prepare(`
       SELECT
