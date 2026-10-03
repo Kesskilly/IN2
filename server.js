@@ -10,15 +10,12 @@ import { readFile } from 'node:fs/promises';
 import { v2 as cloudinary } from 'cloudinary';
 import multer from 'multer';
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 const app = express();
+
+/* =========================================================
+   DATABASE
+========================================================= */
 
 const db = new Database(
   path.join(__dirname, 'in2u.db')
@@ -36,24 +33,34 @@ const schemaSql = await readFile(
   'utf8'
 );
 
-if (typeof schemaSql !== 'string') {
-  throw new Error(
-    'schema.sql could not be read as text'
-  );
-}
-
 db.exec(schemaSql);
+
+/* =========================================================
+   CLOUDINARY
+========================================================= */
+
+cloudinary.config({
+  cloud_name:
+    process.env.CLOUDINARY_CLOUD_NAME,
+
+  api_key:
+    process.env.CLOUDINARY_API_KEY,
+
+  api_secret:
+    process.env.CLOUDINARY_API_SECRET
+});
 
 /* =========================================================
    CORS
 ========================================================= */
 
-const configuredOrigins = String(
-  process.env.CORS_ORIGIN || '*'
-)
-  .split(',')
-  .map(x => x.trim())
-  .filter(Boolean);
+const configuredOrigins =
+  String(
+    process.env.CORS_ORIGIN || '*'
+  )
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean);
 
 app.use(
   cors({
@@ -67,7 +74,9 @@ app.use(
       }
 
       return callback(
-        new Error('Origin not allowed by CORS')
+        new Error(
+          'Origin not allowed by CORS'
+        )
       );
     },
 
@@ -106,44 +115,57 @@ app.use(
 
 /* =========================================================
    MULTER
-   Handles multipart/form-data uploads from index.html
 ========================================================= */
 
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage:
+    multer.memoryStorage(),
 
   limits: {
-    fileSize: 100 * 1024 * 1024
+    fileSize:
+      100 * 1024 * 1024
   },
 
-  fileFilter(req, file, cb) {
-    const type = String(
-      file.mimetype || ''
-    ).toLowerCase();
+  fileFilter(
+    req,
+    file,
+    cb
+  ) {
+    const type =
+      String(
+        file.mimetype || ''
+      ).toLowerCase();
 
-    const allowed =
+    if (
       type.startsWith('image/') ||
-      type.startsWith('video/');
-
-    if (!allowed) {
-      return cb(
-        new Error(
-          'Only image and video files are allowed'
-        )
-      );
+      type.startsWith('video/')
+    ) {
+      return cb(null, true);
     }
 
-    cb(null, true);
+    cb(
+      new Error(
+        'Only image and video files are allowed'
+      )
+    );
   }
 });
 
 /* =========================================================
-   AUTH
+   AUTH / JWT
 ========================================================= */
 
 const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  'dev-only-change-this-secret';
+  String(
+    process.env.JWT_SECRET ||
+      'dev-only-change-this-secret'
+  );
+
+if (!process.env.JWT_SECRET) {
+  console.warn(
+    'WARNING: JWT_SECRET is not set. Set a permanent JWT_SECRET in Render Environment Variables.'
+  );
+}
 
 const publicUser = u => ({
   id: u.id,
@@ -152,48 +174,117 @@ const publicUser = u => ({
   email: u.email,
   bio: u.bio,
   photoUrl: u.photo_url,
-  isPrivate: !!u.is_private,
-  allowMessages: !!u.allow_messages,
-  approveFollowers: !!u.approve_followers,
-  showFollowers: !!u.show_followers,
-  showFollowing: !!u.show_following
+
+  isPrivate:
+    !!u.is_private,
+
+  allowMessages:
+    !!u.allow_messages,
+
+  approveFollowers:
+    !!u.approve_followers,
+
+  showFollowers:
+    !!u.show_followers,
+
+  showFollowing:
+    !!u.show_following
 });
 
 function tokenFor(u) {
   return jwt.sign(
     {
-      sub: u.id
+      sub: String(u.id)
     },
+
     JWT_SECRET,
+
     {
       expiresIn: '30d'
     }
   );
 }
 
-function auth(req, res, next) {
+function auth(
+  req,
+  res,
+  next
+) {
   try {
-    const h =
-      req.headers.authorization || '';
+    const header =
+      String(
+        req.headers.authorization ||
+          ''
+      );
 
-    if (!h.startsWith('Bearer ')) {
+    if (
+      !header.startsWith(
+        'Bearer '
+      )
+    ) {
       return res.status(401).json({
-        error: 'Authentication required'
+        error:
+          'Authentication required'
       });
     }
 
-    const decoded = jwt.verify(
-      h.slice(7),
-      JWT_SECRET
-    );
+    const token =
+      header
+        .slice(7)
+        .trim();
 
-    req.userId = decoded.sub;
+    if (!token) {
+      return res.status(401).json({
+        error:
+          'Authentication required'
+      });
+    }
+
+    const decoded =
+      jwt.verify(
+        token,
+        JWT_SECRET
+      );
+
+    if (
+      !decoded ||
+      decoded.sub ===
+        undefined ||
+      decoded.sub === null
+    ) {
+      return res.status(401).json({
+        error:
+          'Invalid or expired token'
+      });
+    }
+
+    req.userId =
+      Number(decoded.sub);
+
+    if (
+      !Number.isInteger(
+        req.userId
+      ) ||
+      req.userId <= 0
+    ) {
+      return res.status(401).json({
+        error:
+          'Invalid user session'
+      });
+    }
 
     next();
 
-  } catch {
+  } catch (error) {
+    console.error(
+      'Auth error:',
+      error?.message ||
+        error
+    );
+
     return res.status(401).json({
-      error: 'Invalid or expired token'
+      error:
+        'Invalid or expired token'
     });
   }
 }
@@ -207,8 +298,10 @@ app.get(
   (req, res) => {
     res.json({
       ok: true,
-      service: 'In2U backend',
-      time: new Date().toISOString()
+      service:
+        'In2U backend',
+      time:
+        new Date().toISOString()
     });
   }
 );
@@ -227,10 +320,27 @@ app.post(
       username
     } = req.body || {};
 
+    const cleanName =
+      String(
+        name || ''
+      ).trim();
+
+    const cleanEmail =
+      String(
+        email || ''
+      )
+        .trim()
+        .toLowerCase();
+
+    const cleanPassword =
+      String(
+        password || ''
+      );
+
     if (
-      !name ||
-      !email ||
-      !password
+      !cleanName ||
+      !cleanEmail ||
+      !cleanPassword
     ) {
       return res.status(400).json({
         error:
@@ -238,30 +348,62 @@ app.post(
       });
     }
 
-    if (String(password).length < 8) {
+    if (
+      cleanPassword.length <
+      8
+    ) {
       return res.status(400).json({
         error:
           'Password must be at least 8 characters'
       });
     }
 
-    const cleanEmail =
-      String(email)
-        .trim()
-        .toLowerCase();
-
     const cleanUsername =
-      String(username || name)
+      String(
+        username ||
+          cleanName
+      )
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9_]/g, '')
+        .replace(
+          /[^a-z0-9_]/g,
+          ''
+        )
         .slice(0, 30) ||
       `user${Date.now()}`;
 
     try {
+      const existingEmail =
+        db.prepare(
+          'SELECT id FROM users WHERE email=?'
+        ).get(
+          cleanEmail
+        );
+
+      if (existingEmail) {
+        return res.status(409).json({
+          error:
+            'Email already in use'
+        });
+      }
+
+      const existingUsername =
+        db.prepare(
+          'SELECT id FROM users WHERE username=?'
+        ).get(
+          cleanUsername
+        );
+
+      if (existingUsername) {
+        return res.status(409).json({
+          error:
+            'Username already in use'
+        });
+      }
+
       const hash =
         await bcrypt.hash(
-          password,
+          cleanPassword,
           12
         );
 
@@ -275,36 +417,45 @@ app.post(
           )
           VALUES(?,?,?,?)
         `).run(
-          String(name).trim(),
+          cleanName,
           cleanUsername,
           cleanEmail,
           hash
         );
 
-      const u =
+      const user =
         db.prepare(
           'SELECT * FROM users WHERE id=?'
         ).get(
-          info.lastInsertRowid
+          Number(
+            info.lastInsertRowid
+          )
         );
 
-      res.status(201).json({
-        token: tokenFor(u),
-        user: publicUser(u)
+      if (!user) {
+        return res.status(500).json({
+          error:
+            'Account was created but could not be loaded'
+        });
+      }
+
+      return res.status(201).json({
+        token:
+          tokenFor(user),
+
+        user:
+          publicUser(user)
       });
 
-    } catch (e) {
-      res.status(409).json({
+    } catch (error) {
+      console.error(
+        'Signup error:',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          e.message.includes(
-            'users.email'
-          )
-            ? 'Email already in use'
-            : e.message.includes(
-                'users.username'
-              )
-              ? 'Username already in use'
-              : 'Account could not be created'
+          'Account could not be created'
       });
     }
   }
@@ -317,37 +468,75 @@ app.post(
 app.post(
   '/api/auth/login',
   async (req, res) => {
-    const {
-      email,
-      password
-    } = req.body || {};
+    const cleanEmail =
+      String(
+        req.body?.email || ''
+      )
+        .trim()
+        .toLowerCase();
 
-    const u =
-      db.prepare(
-        'SELECT * FROM users WHERE email=?'
-      ).get(
-        String(email || '')
-          .trim()
-          .toLowerCase()
+    const password =
+      String(
+        req.body?.password || ''
       );
 
     if (
-      !u ||
-      !(await bcrypt.compare(
-        String(password || ''),
-        u.password_hash
-      ))
+      !cleanEmail ||
+      !password
     ) {
-      return res.status(401).json({
+      return res.status(400).json({
         error:
-          'Invalid email or password'
+          'Email and password are required'
       });
     }
 
-    res.json({
-      token: tokenFor(u),
-      user: publicUser(u)
-    });
+    try {
+      const user =
+        db.prepare(
+          'SELECT * FROM users WHERE email=?'
+        ).get(
+          cleanEmail
+        );
+
+      if (!user) {
+        return res.status(401).json({
+          error:
+            'Invalid email or password'
+        });
+      }
+
+      const valid =
+        await bcrypt.compare(
+          password,
+          user.password_hash
+        );
+
+      if (!valid) {
+        return res.status(401).json({
+          error:
+            'Invalid email or password'
+        });
+      }
+
+      return res.json({
+        token:
+          tokenFor(user),
+
+        user:
+          publicUser(user)
+      });
+
+    } catch (error) {
+      console.error(
+        'Login error:',
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          'Login failed'
+      });
+    }
   }
 );
 
@@ -359,21 +548,23 @@ app.get(
   '/api/me',
   auth,
   (req, res) => {
-    const u =
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE id=?'
       ).get(
         req.userId
       );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
-    res.json({
-      user: publicUser(u)
+    return res.json({
+      user:
+        publicUser(user)
     });
   }
 );
@@ -386,58 +577,68 @@ app.patch(
   '/api/me',
   auth,
   (req, res) => {
-    const u =
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE id=?'
       ).get(
         req.userId
       );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
     const b =
       req.body || {};
 
-    const vals = {
+    const values = {
       name:
-        b.name ?? u.name,
+        b.name ??
+        user.name,
 
       username:
-        b.username ?? u.username,
+        b.username ??
+        user.username,
 
       bio:
-        b.bio ?? u.bio,
+        b.bio ??
+        user.bio,
 
       photo_url:
-        b.photoUrl ?? u.photo_url,
+        b.photoUrl ??
+        user.photo_url,
 
       is_private:
-        b.isPrivate === undefined
-          ? u.is_private
+        b.isPrivate ===
+        undefined
+          ? user.is_private
           : +!!b.isPrivate,
 
       allow_messages:
-        b.allowMessages === undefined
-          ? u.allow_messages
+        b.allowMessages ===
+        undefined
+          ? user.allow_messages
           : +!!b.allowMessages,
 
       approve_followers:
-        b.approveFollowers === undefined
-          ? u.approve_followers
+        b.approveFollowers ===
+        undefined
+          ? user.approve_followers
           : +!!b.approveFollowers,
 
       show_followers:
-        b.showFollowers === undefined
-          ? u.show_followers
+        b.showFollowers ===
+        undefined
+          ? user.show_followers
           : +!!b.showFollowers,
 
       show_following:
-        b.showFollowing === undefined
-          ? u.show_following
+        b.showFollowing ===
+        undefined
+          ? user.show_following
           : +!!b.showFollowing
     };
 
@@ -456,30 +657,37 @@ app.patch(
           show_following=?
         WHERE id=?
       `).run(
-        vals.name,
-        vals.username,
-        vals.bio,
-        vals.photo_url,
-        vals.is_private,
-        vals.allow_messages,
-        vals.approve_followers,
-        vals.show_followers,
-        vals.show_following,
+        values.name,
+        values.username,
+        values.bio,
+        values.photo_url,
+        values.is_private,
+        values.allow_messages,
+        values.approve_followers,
+        values.show_followers,
+        values.show_following,
         req.userId
       );
 
-      res.json({
-        user: publicUser(
-          db.prepare(
-            'SELECT * FROM users WHERE id=?'
-          ).get(
-            req.userId
-          )
-        )
+      const updated =
+        db.prepare(
+          'SELECT * FROM users WHERE id=?'
+        ).get(
+          req.userId
+        );
+
+      return res.json({
+        user:
+          publicUser(updated)
       });
 
-    } catch {
-      res.status(409).json({
+    } catch (error) {
+      console.error(
+        'Profile update error:',
+        error
+      );
+
+      return res.status(409).json({
         error:
           'Username may already be in use'
       });
@@ -495,16 +703,18 @@ app.get(
   '/api/users/:username',
   auth,
   (req, res) => {
-    const u =
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE username=?'
       ).get(
-        req.params.username.toLowerCase()
+        req.params.username
+          .toLowerCase()
       );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
@@ -514,7 +724,9 @@ app.get(
         FROM follows
         WHERE following_id=?
         AND status='accepted'
-      `).get(u.id).n;
+      `).get(
+        user.id
+      ).n;
 
     const following =
       db.prepare(`
@@ -522,11 +734,13 @@ app.get(
         FROM follows
         WHERE follower_id=?
         AND status='accepted'
-      `).get(u.id).n;
+      `).get(
+        user.id
+      ).n;
 
-    res.json({
+    return res.json({
       user: {
-        ...publicUser(u),
+        ...publicUser(user),
         followers,
         following
       }
@@ -543,28 +757,47 @@ app.post(
   auth,
   (req, res) => {
     const target =
-      Number(req.params.id);
+      Number(
+        req.params.id
+      );
 
-    if (target === req.userId) {
+    if (
+      !Number.isInteger(
+        target
+      )
+    ) {
+      return res.status(400).json({
+        error:
+          'Invalid user ID'
+      });
+    }
+
+    if (
+      target ===
+      req.userId
+    ) {
       return res.status(400).json({
         error:
           'You cannot follow yourself'
       });
     }
 
-    const u =
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE id=?'
-      ).get(target);
+      ).get(
+        target
+      );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
     const status =
-      u.approve_followers
+      user.approve_followers
         ? 'pending'
         : 'accepted';
 
@@ -587,7 +820,7 @@ app.post(
       status
     );
 
-    res.json({
+    return res.json({
       status
     });
   }
@@ -603,10 +836,12 @@ app.delete(
       AND following_id=?
     `).run(
       req.userId,
-      Number(req.params.id)
+      Number(
+        req.params.id
+      )
     );
 
-    res.json({
+    return res.json({
       ok: true
     });
   }
@@ -620,23 +855,29 @@ app.get(
   '/api/users/:id/followers',
   auth,
   (req, res) => {
-    const u =
+    const id =
+      Number(
+        req.params.id
+      );
+
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE id=?'
       ).get(
-        Number(req.params.id)
+        id
       );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
     if (
-      u.is_private &&
-      Number(req.params.id) !== req.userId &&
-      !u.show_followers
+      user.is_private &&
+      id !== req.userId &&
+      !user.show_followers
     ) {
       return res.status(403).json({
         error:
@@ -653,11 +894,15 @@ app.get(
         WHERE f.following_id=?
         AND f.status='accepted'
         ORDER BY f.created_at DESC
-      `).all(u.id);
+      `).all(
+        id
+      );
 
-    res.json({
+    return res.json({
       users:
-        rows.map(publicUser)
+        rows.map(
+          publicUser
+        )
     });
   }
 );
@@ -670,23 +915,29 @@ app.get(
   '/api/users/:id/following',
   auth,
   (req, res) => {
-    const u =
+    const id =
+      Number(
+        req.params.id
+      );
+
+    const user =
       db.prepare(
         'SELECT * FROM users WHERE id=?'
       ).get(
-        Number(req.params.id)
+        id
       );
 
-    if (!u) {
+    if (!user) {
       return res.status(404).json({
-        error: 'User not found'
+        error:
+          'User not found'
       });
     }
 
     if (
-      u.is_private &&
-      Number(req.params.id) !== req.userId &&
-      !u.show_following
+      user.is_private &&
+      id !== req.userId &&
+      !user.show_following
     ) {
       return res.status(403).json({
         error:
@@ -703,55 +954,53 @@ app.get(
         WHERE f.follower_id=?
         AND f.status='accepted'
         ORDER BY f.created_at DESC
-      `).all(u.id);
+      `).all(
+        id
+      );
 
-    res.json({
+    return res.json({
       users:
-        rows.map(publicUser)
+        rows.map(
+          publicUser
+        )
     });
   }
 );
 
 /* =========================================================
-   CLOUDINARY MEDIA UPLOAD
-   IMPORTANT:
-   Frontend sends:
-   POST /api/uploads
-   multipart/form-data
-   field name = file
+   CLOUDINARY UPLOAD
 ========================================================= */
 
 app.post(
   '/api/uploads',
   auth,
   upload.single('file'),
+
   async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({
-          error: 'No file provided'
+          error:
+            'No file provided'
         });
       }
 
-      const mimeType =
-        String(
-          req.file.mimetype || ''
-        ).toLowerCase();
+      const cloudName =
+        process.env
+          .CLOUDINARY_CLOUD_NAME;
 
-      const isVideo =
-        mimeType.startsWith(
-          'video/'
-        );
+      const apiKey =
+        process.env
+          .CLOUDINARY_API_KEY;
 
-      const resourceType =
-        isVideo
-          ? 'video'
-          : 'image';
+      const apiSecret =
+        process.env
+          .CLOUDINARY_API_SECRET;
 
       if (
-        !process.env.CLOUDINARY_CLOUD_NAME ||
-        !process.env.CLOUDINARY_API_KEY ||
-        !process.env.CLOUDINARY_API_SECRET
+        !cloudName ||
+        !apiKey ||
+        !apiSecret
       ) {
         console.error(
           'Cloudinary environment variables are missing'
@@ -763,38 +1012,56 @@ app.post(
         });
       }
 
+      const mimeType =
+        String(
+          req.file.mimetype ||
+            ''
+        ).toLowerCase();
+
+      const resourceType =
+        mimeType.startsWith(
+          'video/'
+        )
+          ? 'video'
+          : 'image';
+
       console.log(
-        `Uploading ${resourceType}:`,
-        req.file.originalname,
-        req.file.size,
-        'bytes'
+        `Uploading ${resourceType}: ${req.file.originalname} (${req.file.size} bytes)`
       );
 
       const result =
         await new Promise(
-          (resolve, reject) => {
+          (
+            resolve,
+            reject
+          ) => {
             const stream =
-              cloudinary.uploader.upload_stream(
-                {
-                  folder: 'in2u',
-                  resource_type:
-                    resourceType
-                },
-                (
-                  error,
-                  uploadResult
-                ) => {
-                  if (error) {
-                    return reject(
-                      error
+              cloudinary
+                .uploader
+                .upload_stream(
+                  {
+                    folder:
+                      'in2u',
+
+                    resource_type:
+                      resourceType
+                  },
+
+                  (
+                    error,
+                    uploadResult
+                  ) => {
+                    if (error) {
+                      return reject(
+                        error
+                      );
+                    }
+
+                    resolve(
+                      uploadResult
                     );
                   }
-
-                  resolve(
-                    uploadResult
-                  );
-                }
-              );
+                );
 
             stream.end(
               req.file.buffer
@@ -852,62 +1119,91 @@ app.post(
   '/api/posts',
   auth,
   (req, res) => {
-    const {
-      caption = '',
-      media = []
-    } = req.body || {};
+    const caption =
+      String(
+        req.body?.caption ||
+          ''
+      );
 
-    const tx =
-      db.transaction(() => {
-        const p =
-          db.prepare(`
-            INSERT INTO posts(
-              user_id,
-              caption
-            )
-            VALUES(?,?)
-          `).run(
-            req.userId,
-            String(caption)
-          );
+    const media =
+      Array.isArray(
+        req.body?.media
+      )
+        ? req.body.media
+        : [];
 
-        const add =
-          db.prepare(`
-            INSERT INTO post_media(
-              post_id,
-              url,
-              sort_order
-            )
-            VALUES(?,?,?)
-          `);
-
-        (
-          Array.isArray(media)
-            ? media
-            : []
-        )
-          .slice(0, 5)
-          .forEach(
-            (url, i) => {
-              add.run(
-                p.lastInsertRowid,
-                String(url),
-                i
+    try {
+      const tx =
+        db.transaction(
+          () => {
+            const post =
+              db.prepare(`
+                INSERT INTO posts(
+                  user_id,
+                  caption
+                )
+                VALUES(?,?)
+              `).run(
+                req.userId,
+                caption
               );
-            }
-          );
 
-        return p.lastInsertRowid;
+            const addMedia =
+              db.prepare(`
+                INSERT INTO post_media(
+                  post_id,
+                  url,
+                  sort_order
+                )
+                VALUES(?,?,?)
+              `);
+
+            media
+              .slice(0, 5)
+              .forEach(
+                (
+                  url,
+                  index
+                ) => {
+                  if (url) {
+                    addMedia.run(
+                      post.lastInsertRowid,
+                      String(url),
+                      index
+                    );
+                  }
+                }
+              );
+
+            return Number(
+              post.lastInsertRowid
+            );
+          }
+        );
+
+      const postId =
+        tx();
+
+      return res.status(201).json({
+        post:
+          db.prepare(
+            'SELECT * FROM posts WHERE id=?'
+          ).get(
+            postId
+          )
       });
 
-    const id = tx();
+    } catch (error) {
+      console.error(
+        'Create post error:',
+        error
+      );
 
-    res.status(201).json({
-      post:
-        db.prepare(
-          'SELECT * FROM posts WHERE id=?'
-        ).get(id)
-    });
+      return res.status(500).json({
+        error:
+          'Could not create post'
+      });
+    }
   }
 );
 
@@ -945,12 +1241,18 @@ app.get(
         ORDER BY sort_order
       `).all();
 
-    const map = {};
+    const mediaMap = {};
 
-    for (const m of media) {
+    for (
+      const item of media
+    ) {
       (
-        map[m.post_id] ??= []
-      ).push(m.url);
+        mediaMap[
+          item.post_id
+        ] ??= []
+      ).push(
+        item.url
+      );
     }
 
     const reactions =
@@ -965,19 +1267,35 @@ app.get(
 
     const reactionMap = {};
 
-    for (const r of reactions) {
-      const x =
-        reactionMap[r.post_id] ??= {
+    for (
+      const reaction of reactions
+    ) {
+      const entry =
+        reactionMap[
+          reaction.post_id
+        ] ??= {
           counts: {},
           users: {}
         };
 
-      x.counts[r.emoji] =
-        (x.counts[r.emoji] || 0) + 1;
+      entry.counts[
+        reaction.emoji
+      ] =
+        (
+          entry.counts[
+            reaction.emoji
+          ] || 0
+        ) + 1;
 
       (
-        x.users[r.emoji] ??= []
-      ).push(r.user_id);
+        entry.users[
+          reaction.emoji
+        ] ??= []
+      ).push(
+        Number(
+          reaction.user_id
+        )
+      );
     }
 
     const comments =
@@ -1000,117 +1318,167 @@ app.get(
 
     const commentMap = {};
 
-    for (const c of comments) {
+    for (
+      const comment of comments
+    ) {
       (
-        commentMap[c.post_id] ??= []
+        commentMap[
+          comment.post_id
+        ] ??= []
       ).push({
-        id: c.id,
-        user: c.name,
-        text: c.text,
+        id:
+          comment.id,
+
+        user:
+          comment.name,
+
+        text:
+          comment.text,
+
         reactions: {},
+
         replies: [],
-        parentId: c.parent_id
+
+        parentId:
+          comment.parent_id
       });
     }
 
-    for (const p of rows) {
-      const arr =
-        commentMap[p.id] || [];
+    for (
+      const post of rows
+    ) {
+      const list =
+        commentMap[
+          post.id
+        ] || [];
 
       const byId =
         Object.fromEntries(
-          arr.map(
-            c => [c.id, c]
+          list.map(
+            comment => [
+              comment.id,
+              comment
+            ]
           )
         );
 
-      for (const c of arr) {
+      for (
+        const comment of list
+      ) {
         if (
-          c.parentId &&
-          byId[c.parentId]
+          comment.parentId &&
+          byId[
+            comment.parentId
+          ]
         ) {
-          byId[c.parentId]
+          byId[
+            comment.parentId
+          ]
             .replies
-            .push(c);
+            .push(
+              comment
+            );
         }
       }
 
-      commentMap[p.id] =
-        arr
+      commentMap[
+        post.id
+      ] =
+        list
           .filter(
-            c => !c.parentId
+            comment =>
+              !comment.parentId
           )
-          .map(c => {
-            delete c.parentId;
-            return c;
-          });
+          .map(
+            comment => {
+              delete comment.parentId;
+              return comment;
+            }
+          );
     }
 
     const posts =
-      rows.map(p => {
-        const r =
-          reactionMap[p.id] || {
-            counts: {},
-            users: {}
+      rows.map(
+        post => {
+          const reaction =
+            reactionMap[
+              post.id
+            ] || {
+              counts: {},
+              users: {}
+            };
+
+          const reactionUsers =
+            Object.fromEntries(
+              Object.entries(
+                reaction.users
+              ).map(
+                (
+                  [
+                    emoji,
+                    ids
+                  ]
+                ) => [
+                  emoji,
+
+                  ids.map(
+                    id => {
+                      const user =
+                        db.prepare(`
+                          SELECT
+                            name,
+                            username,
+                            photo_url
+                          FROM users
+                          WHERE id=?
+                        `).get(
+                          id
+                        );
+
+                      return {
+                        name:
+                          user?.name ||
+                          'User',
+
+                        handle:
+                          '@' +
+                          (
+                            user?.username ||
+                            'user'
+                          ),
+
+                        photo:
+                          user?.photo_url ||
+                          ''
+                      };
+                    }
+                  )
+                ]
+              )
+            );
+
+          return {
+            ...post,
+
+            media:
+              mediaMap[
+                post.id
+              ] || [],
+
+            reactions:
+              reaction.counts,
+
+            reactionUsers,
+
+            comments:
+              commentMap[
+                post.id
+              ] || []
           };
+        }
+      );
 
-        const reactionUsers =
-          Object.fromEntries(
-            Object.entries(
-              r.users
-            ).map(
-              ([e, ids]) => [
-                e,
-                ids.map(id => {
-                  const u =
-                    db.prepare(`
-                      SELECT
-                        name,
-                        username,
-                        photo_url
-                      FROM users
-                      WHERE id=?
-                    `).get(id);
-
-                  return {
-                    name:
-                      u?.name ||
-                      'User',
-
-                    handle:
-                      '@' +
-                      (
-                        u?.username ||
-                        'user'
-                      ),
-
-                    photo:
-                      u?.photo_url ||
-                      ''
-                  };
-                })
-              ]
-            )
-          );
-
-        return {
-          ...p,
-
-          media:
-            map[p.id] || [],
-
-          reactions:
-            r.counts,
-
-          reactionUsers,
-
-          comments:
-            commentMap[p.id] ||
-            []
-        };
-      });
-
-    res.json({
+    return res.json({
       posts
     });
   }
@@ -1127,7 +1495,7 @@ app.post(
     const emoji =
       String(
         req.body?.emoji ||
-        '❤️'
+          '❤️'
       );
 
     db.prepare(`
@@ -1145,11 +1513,13 @@ app.post(
         emoji=excluded.emoji
     `).run(
       req.userId,
-      Number(req.params.id),
+      Number(
+        req.params.id
+      ),
       emoji
     );
 
-    res.json({
+    return res.json({
       ok: true
     });
   }
@@ -1166,7 +1536,7 @@ app.post(
     const text =
       String(
         req.body?.text ||
-        ''
+          ''
       ).trim();
 
     if (!text) {
@@ -1175,6 +1545,18 @@ app.post(
           'Comment is required'
       });
     }
+
+    const parentId =
+      req.body?.parentId ===
+        undefined ||
+      req.body?.parentId ===
+        null ||
+      req.body?.parentId ===
+        ''
+        ? null
+        : Number(
+            req.body.parentId
+          );
 
     const info =
       db.prepare(`
@@ -1186,32 +1568,45 @@ app.post(
         )
         VALUES(?,?,?,?)
       `).run(
-        Number(req.params.id),
+        Number(
+          req.params.id
+        ),
+
         req.userId,
-        req.body?.parentId ||
-          null,
+
+        parentId,
+
         text
       );
 
-    res.status(201).json({
+    return res.status(201).json({
       id:
-        info.lastInsertRowid
+        Number(
+          info.lastInsertRowid
+        )
     });
   }
 );
 
 /* =========================================================
-   MULTER / GENERAL ERROR HANDLER
+   ERROR HANDLER
 ========================================================= */
 
 app.use(
-  (err, req, res, next) => {
+  (
+    err,
+    req,
+    res,
+    next
+  ) => {
     console.error(
       'Server error:',
       err
     );
 
-    if (res.headersSent) {
+    if (
+      res.headersSent
+    ) {
       return next(err);
     }
 
@@ -1240,7 +1635,10 @@ app.use(
 ========================================================= */
 
 const PORT =
-  process.env.PORT || 3000;
+  Number(
+    process.env.PORT ||
+      3000
+  );
 
 app.listen(
   PORT,
