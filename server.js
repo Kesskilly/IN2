@@ -4,648 +4,575 @@ import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import Database from 'better-sqlite3';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
-import { v2 as cloudinary } from 'cloudinary';
 import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+const PORT = Number(process.env.PORT || 10000);
+const JWT_SECRET = String(
+  process.env.JWT_SECRET || 'change-this-in2u-secret'
+);
 
-/* =========================================================
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json({ limit: '40mb' }));
+
+const db = new Database('in2u.db');
+db.pragma('journal_mode = WAL');
+
+/* =========================
    DATABASE
-========================================================= */
+========================= */
 
-const db = new Database(
-  path.join(__dirname, 'in2u.db')
-);
+function ensureSchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      username TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      bio TEXT DEFAULT '',
+      photo_url TEXT DEFAULT '',
+      is_private INTEGER DEFAULT 0,
+      allow_messages INTEGER DEFAULT 1,
+      approve_followers INTEGER DEFAULT 0,
+      show_followers INTEGER DEFAULT 1,
+      show_following INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
 
-db.pragma('foreign_keys = ON');
+    CREATE TABLE IF NOT EXISTS posts(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      caption TEXT DEFAULT '',
+      media_json TEXT DEFAULT '[]',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
 
-const schemaPath = path.join(
-  __dirname,
-  'schema.sql'
-);
+    CREATE TABLE IF NOT EXISTS reactions(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      post_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      emoji TEXT NOT NULL,
+      UNIQUE(post_id,user_id,emoji)
+    );
 
-const schemaSql = await readFile(
-  schemaPath,
-  'utf8'
-);
+    CREATE TABLE IF NOT EXISTS comments(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      post_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      parent_id INTEGER DEFAULT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
 
-db.exec(schemaSql);
+    CREATE TABLE IF NOT EXISTS follows(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      follower_id INTEGER NOT NULL,
+      following_id INTEGER NOT NULL,
+      status TEXT DEFAULT 'accepted',
+      UNIQUE(follower_id,following_id)
+    );
+  `);
+}
 
-/* =========================================================
-   CLOUDINARY
-========================================================= */
+ensureSchema();
 
-cloudinary.config({
-  cloud_name:
-    process.env.CLOUDINARY_CLOUD_NAME,
-
-  api_key:
-    process.env.CLOUDINARY_API_KEY,
-
-  api_secret:
-    process.env.CLOUDINARY_API_SECRET
-});
-
-/* =========================================================
-   CORS
-========================================================= */
-
-const configuredOrigins =
-  String(
-    process.env.CORS_ORIGIN || '*'
-  )
-    .split(',')
-    .map(x => x.trim())
-    .filter(Boolean);
-
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (
-        !origin ||
-        configuredOrigins.includes('*') ||
-        configuredOrigins.includes(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error(
-          'Origin not allowed by CORS'
-        )
-      );
-    },
-
-    credentials: false,
-
-    methods: [
-      'GET',
-      'POST',
-      'PATCH',
-      'DELETE',
-      'OPTIONS'
-    ],
-
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization'
-    ]
-  })
-);
-
-/* =========================================================
-   BODY PARSERS
-========================================================= */
-
-app.use(
-  express.json({
-    limit: '40mb'
-  })
-);
-
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
-
-/* =========================================================
+/* =========================
    MULTER
-========================================================= */
+========================= */
 
 const upload = multer({
-  storage:
-    multer.memoryStorage(),
+  storage: multer.memoryStorage(),
 
   limits: {
-    fileSize:
-      100 * 1024 * 1024
+    fileSize: 100 * 1024 * 1024
   },
 
-  fileFilter(
-    req,
-    file,
-    cb
-  ) {
-    const type =
-      String(
-        file.mimetype || ''
-      ).toLowerCase();
+  fileFilter: (req, file, cb) => {
+    const mime = String(file.mimetype || '');
 
-    if (
-      type.startsWith('image/') ||
-      type.startsWith('video/')
-    ) {
-      return cb(null, true);
+    const allowed =
+      /^(image|video|audio)\//i.test(mime);
+
+    if (!allowed) {
+      return cb(
+        new Error(
+          'Only image, video and audio files are supported'
+        )
+      );
     }
 
-    cb(
-      new Error(
-        'Only image and video files are allowed'
-      )
-    );
+    cb(null, true);
   }
 });
 
-/* =========================================================
-   AUTH / JWT
-========================================================= */
+/* =========================
+   CLOUDINARY
+========================= */
 
-const JWT_SECRET =
-  String(
-    process.env.JWT_SECRET ||
-      'dev-only-change-this-secret'
-  );
+function configureCloudinary() {
+  const cloudName = String(
+    process.env.CLOUDINARY_CLOUD_NAME || ''
+  ).trim();
 
-if (!process.env.JWT_SECRET) {
-  console.warn(
-    'WARNING: JWT_SECRET is not set. Set a permanent JWT_SECRET in Render Environment Variables.'
-  );
+  const apiKey = String(
+    process.env.CLOUDINARY_API_KEY || ''
+  ).trim();
+
+  const apiSecret = String(
+    process.env.CLOUDINARY_API_SECRET || ''
+  ).trim();
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    console.error(
+      'Cloudinary is NOT configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET in Render.'
+    );
+
+    return false;
+  }
+
+  cloudinary.config({
+    cloud_name: cloudName,
+    api_key: apiKey,
+    api_secret: apiSecret,
+    secure: true
+  });
+
+  return true;
 }
 
-const publicUser = u => ({
-  id: u.id,
-  name: u.name,
-  username: u.username,
-  email: u.email,
-  bio: u.bio,
-  photoUrl: u.photo_url,
+const cloudinaryReady = configureCloudinary();
 
-  isPrivate:
-    !!u.is_private,
+/* =========================
+   JWT
+========================= */
 
-  allowMessages:
-    !!u.allow_messages,
-
-  approveFollowers:
-    !!u.approve_followers,
-
-  showFollowers:
-    !!u.show_followers,
-
-  showFollowing:
-    !!u.show_following
-});
-
-function tokenFor(u) {
+function signToken(userId) {
   return jwt.sign(
     {
-      sub: String(u.id)
+      sub: String(userId)
     },
-
     JWT_SECRET,
-
     {
       expiresIn: '30d'
     }
   );
 }
 
-function auth(
-  req,
-  res,
-  next
-) {
+/* =========================
+   AUTH MIDDLEWARE
+========================= */
+
+function auth(req, res, next) {
+  const header = String(
+    req.headers.authorization || ''
+  );
+
+  const token = header.startsWith('Bearer ')
+    ? header.slice(7).trim()
+    : '';
+
+  if (!token) {
+    return res.status(401).json({
+      error: 'Authentication required'
+    });
+  }
+
   try {
-    const header =
-      String(
-        req.headers.authorization ||
-          ''
-      );
-
-    if (
-      !header.startsWith(
-        'Bearer '
-      )
-    ) {
-      return res.status(401).json({
-        error:
-          'Authentication required'
-      });
-    }
-
-    const token =
-      header
-        .slice(7)
-        .trim();
-
-    if (!token) {
-      return res.status(401).json({
-        error:
-          'Authentication required'
-      });
-    }
-
-    const decoded =
-      jwt.verify(
-        token,
-        JWT_SECRET
-      );
-
-    if (
-      !decoded ||
-      decoded.sub ===
-        undefined ||
-      decoded.sub === null
-    ) {
-      return res.status(401).json({
-        error:
-          'Invalid or expired token'
-      });
-    }
-
-    req.userId =
-      Number(decoded.sub);
-
-    if (
-      !Number.isInteger(
-        req.userId
-      ) ||
-      req.userId <= 0
-    ) {
-      return res.status(401).json({
-        error:
-          'Invalid user session'
-      });
-    }
-
-    next();
-
-  } catch (error) {
-    console.error(
-      'Auth error:',
-      error?.message ||
-        error
+    const decoded = jwt.verify(
+      token,
+      JWT_SECRET
     );
 
+    const userId = Number(
+      decoded?.sub
+    );
+
+    if (
+      !Number.isInteger(userId) ||
+      userId <= 0
+    ) {
+      throw new Error('Bad token subject');
+    }
+
+    const user = db
+      .prepare(
+        'SELECT * FROM users WHERE id=?'
+      )
+      .get(userId);
+
+    if (!user) {
+      return res.status(401).json({
+        error: 'User not found'
+      });
+    }
+
+    req.userId = userId;
+    req.user = user;
+
+    next();
+  } catch {
     return res.status(401).json({
-      error:
-        'Invalid or expired token'
+      error: 'Invalid or expired token'
     });
   }
 }
 
-/* =========================================================
+/* =========================
+   USER FORMAT
+========================= */
+
+function publicUser(u) {
+  return {
+    id: u.id,
+    name: u.name,
+    username: u.username,
+    email: u.email,
+    bio: u.bio || '',
+    photoUrl: u.photo_url || '',
+    isPrivate: !!u.is_private,
+    allowMessages: u.allow_messages !== 0,
+    approveFollowers: !!u.approve_followers,
+    showFollowers: u.show_followers !== 0,
+    showFollowing: u.show_following !== 0
+  };
+}
+
+/* =========================
+   CLOUDINARY UPLOAD
+========================= */
+
+function uploadBuffer(buffer, mimetype) {
+  return new Promise((resolve, reject) => {
+    if (!cloudinaryReady) {
+      return reject(
+        new Error(
+          'Cloudinary is not configured on the server'
+        )
+      );
+    }
+
+    /*
+      Cloudinary stores audio through
+      the "video" resource type.
+    */
+
+    const resourceType =
+      String(mimetype || '').startsWith('audio/') ||
+      String(mimetype || '').startsWith('video/')
+        ? 'video'
+        : 'image';
+
+    const stream =
+      cloudinary.uploader.upload_stream(
+        {
+          folder: 'in2u',
+          resource_type: resourceType,
+          use_filename: false,
+          unique_filename: true,
+          overwrite: false
+        },
+
+        (error, result) => {
+          if (error) {
+            console.error(
+              'Cloudinary upload error:',
+              error
+            );
+
+            return reject(
+              new Error(
+                error?.message ||
+                'Cloudinary upload failed'
+              )
+            );
+          }
+
+          resolve({
+            url:
+              result.secure_url ||
+              result.url,
+
+            publicId:
+              result.public_id,
+
+            resourceType:
+              result.resource_type,
+
+            format:
+              result.format
+          });
+        }
+      );
+
+    stream.end(buffer);
+  });
+}
+
+/* =========================
    HEALTH
-========================================================= */
+========================= */
 
-app.get(
-  '/api/health',
-  (req, res) => {
-    res.json({
-      ok: true,
-      service:
-        'In2U backend',
-      time:
-        new Date().toISOString()
-    });
-  }
-);
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'In2U backend',
+    cloudinary: cloudinaryReady,
+    time: new Date().toISOString()
+  });
+});
 
-/* =========================================================
+/* =========================
    SIGN UP
-========================================================= */
+========================= */
 
 app.post(
   '/api/auth/signup',
   async (req, res) => {
-    const {
-      name,
-      email,
-      password,
-      username
-    } = req.body || {};
-
-    const cleanName =
-      String(
-        name || ''
+    try {
+      const name = String(
+        req.body?.name || ''
       ).trim();
 
-    const cleanEmail =
-      String(
-        email || ''
-      )
-        .trim()
-        .toLowerCase();
+      const email = String(
+        req.body?.email || ''
+      ).trim().toLowerCase();
 
-    const cleanPassword =
-      String(
-        password || ''
+      const password = String(
+        req.body?.password || ''
       );
 
-    if (
-      !cleanName ||
-      !cleanEmail ||
-      !cleanPassword
-    ) {
-      return res.status(400).json({
-        error:
-          'Name, email and password are required'
-      });
-    }
+      const username = String(
+        req.body?.username || ''
+      ).trim().toLowerCase();
 
-    if (
-      cleanPassword.length <
-      8
-    ) {
-      return res.status(400).json({
-        error:
-          'Password must be at least 8 characters'
-      });
-    }
-
-    const cleanUsername =
-      String(
-        username ||
-          cleanName
-      )
-        .trim()
-        .toLowerCase()
-        .replace(
-          /[^a-z0-9_]/g,
-          ''
-        )
-        .slice(0, 30) ||
-      `user${Date.now()}`;
-
-    try {
-      const existingEmail =
-        db.prepare(
-          'SELECT id FROM users WHERE email=?'
-        ).get(
-          cleanEmail
-        );
-
-      if (existingEmail) {
-        return res.status(409).json({
+      if (
+        !name ||
+        !email ||
+        !password ||
+        !username
+      ) {
+        return res.status(400).json({
           error:
-            'Email already in use'
+            'Name, email, username and password are required'
         });
       }
 
-      const existingUsername =
-        db.prepare(
-          'SELECT id FROM users WHERE username=?'
-        ).get(
-          cleanUsername
-        );
+      if (password.length < 8) {
+        return res.status(400).json({
+          error:
+            'Password must be at least 8 characters'
+        });
+      }
 
-      if (existingUsername) {
+      const duplicate = db
+        .prepare(
+          'SELECT id FROM users WHERE email=? OR username=?'
+        )
+        .get(email, username);
+
+      if (duplicate) {
         return res.status(409).json({
           error:
-            'Username already in use'
+            'Email or username already exists'
         });
       }
 
       const hash =
-        await bcrypt.hash(
-          cleanPassword,
-          12
-        );
+        await bcrypt.hash(password, 12);
 
-      const info =
-        db.prepare(`
-          INSERT INTO users(
-            name,
-            username,
-            email,
-            password_hash
-          )
-          VALUES(?,?,?,?)
-        `).run(
-          cleanName,
-          cleanUsername,
-          cleanEmail,
+      const info = db
+        .prepare(
+          `INSERT INTO users
+           (name,username,email,password_hash)
+           VALUES(?,?,?,?)`
+        )
+        .run(
+          name,
+          username,
+          email,
           hash
         );
 
-      const user =
-        db.prepare(
+      const user = db
+        .prepare(
           'SELECT * FROM users WHERE id=?'
-        ).get(
-          Number(
-            info.lastInsertRowid
-          )
-        );
+        )
+        .get(info.lastInsertRowid);
 
-      if (!user) {
-        return res.status(500).json({
-          error:
-            'Account was created but could not be loaded'
-        });
-      }
-
-      return res.status(201).json({
-        token:
-          tokenFor(user),
-
-        user:
-          publicUser(user)
+      res.json({
+        token: signToken(user.id),
+        user: publicUser(user)
       });
 
-    } catch (error) {
+    } catch (e) {
       console.error(
         'Signup error:',
-        error
+        e
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
-          'Account could not be created'
+          'Could not create account'
       });
     }
   }
 );
 
-/* =========================================================
+/* =========================
    LOGIN
-========================================================= */
+========================= */
 
 app.post(
   '/api/auth/login',
   async (req, res) => {
-    const cleanEmail =
-      String(
+    try {
+      const email = String(
         req.body?.email || ''
-      )
-        .trim()
-        .toLowerCase();
+      ).trim().toLowerCase();
 
-    const password =
-      String(
+      const password = String(
         req.body?.password || ''
       );
 
-    if (
-      !cleanEmail ||
-      !password
-    ) {
-      return res.status(400).json({
-        error:
-          'Email and password are required'
-      });
-    }
-
-    try {
-      const user =
-        db.prepare(
+      const user = db
+        .prepare(
           'SELECT * FROM users WHERE email=?'
-        ).get(
-          cleanEmail
-        );
+        )
+        .get(email);
 
-      if (!user) {
-        return res.status(401).json({
-          error:
-            'Invalid email or password'
-        });
-      }
-
-      const valid =
-        await bcrypt.compare(
+      if (
+        !user ||
+        !(await bcrypt.compare(
           password,
           user.password_hash
-        );
-
-      if (!valid) {
+        ))
+      ) {
         return res.status(401).json({
           error:
             'Invalid email or password'
         });
       }
 
-      return res.json({
-        token:
-          tokenFor(user),
-
-        user:
-          publicUser(user)
+      res.json({
+        token: signToken(user.id),
+        user: publicUser(user)
       });
 
-    } catch (error) {
+    } catch (e) {
       console.error(
         'Login error:',
-        error
+        e
       );
 
-      return res.status(500).json({
-        error:
-          'Login failed'
+      res.status(500).json({
+        error: 'Could not log in'
       });
     }
   }
 );
 
-/* =========================================================
+/* =========================
    CURRENT USER
-========================================================= */
+========================= */
 
 app.get(
   '/api/me',
   auth,
   (req, res) => {
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE id=?'
-      ).get(
-        req.userId
-      );
-
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
-
-    return res.json({
-      user:
-        publicUser(user)
+    res.json({
+      user: publicUser(req.user)
     });
   }
 );
 
-/* =========================================================
-   UPDATE CURRENT USER
-========================================================= */
+/* =========================
+   UPDATE PROFILE
+========================= */
 
 app.patch(
   '/api/me',
   auth,
   (req, res) => {
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE id=?'
-      ).get(
-        req.userId
+    try {
+      const b = req.body || {};
+
+      const name =
+        String(
+          b.name ?? req.user.name
+        ).trim() ||
+        req.user.name;
+
+      const username =
+        String(
+          b.username ??
+          req.user.username
+        )
+          .trim()
+          .toLowerCase() ||
+        req.user.username;
+
+      const bio = String(
+        b.bio ??
+        req.user.bio ??
+        ''
       );
 
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
-
-    const b =
-      req.body || {};
-
-    const values = {
-      name:
-        b.name ??
-        user.name,
-
-      username:
-        b.username ??
-        user.username,
-
-      bio:
-        b.bio ??
-        user.bio,
-
-      photo_url:
+      const photoUrl = String(
         b.photoUrl ??
-        user.photo_url,
+        req.user.photo_url ??
+        ''
+      );
 
-      is_private:
-        b.isPrivate ===
-        undefined
-          ? user.is_private
-          : +!!b.isPrivate,
+      const isPrivate =
+        b.isPrivate === undefined
+          ? req.user.is_private
+          : !!b.isPrivate;
 
-      allow_messages:
-        b.allowMessages ===
-        undefined
-          ? user.allow_messages
-          : +!!b.allowMessages,
+      const allowMessages =
+        b.allowMessages === undefined
+          ? req.user.allow_messages
+          : !!b.allowMessages;
 
-      approve_followers:
-        b.approveFollowers ===
-        undefined
-          ? user.approve_followers
-          : +!!b.approveFollowers,
+      const approveFollowers =
+        b.approveFollowers === undefined
+          ? req.user.approve_followers
+          : !!b.approveFollowers;
 
-      show_followers:
-        b.showFollowers ===
-        undefined
-          ? user.show_followers
-          : +!!b.showFollowers,
+      const showFollowers =
+        b.showFollowers === undefined
+          ? req.user.show_followers
+          : !!b.showFollowers;
 
-      show_following:
-        b.showFollowing ===
-        undefined
-          ? user.show_following
-          : +!!b.showFollowing
-    };
+      const showFollowing =
+        b.showFollowing === undefined
+          ? req.user.show_following
+          : !!b.showFollowing;
 
-    try {
+      const existing = db
+        .prepare(
+          'SELECT id FROM users WHERE username=? AND id<>?'
+        )
+        .get(
+          username,
+          req.userId
+        );
+
+      if (existing) {
+        return res.status(409).json({
+          error:
+            'Username already exists'
+        });
+      }
+
       db.prepare(`
-        UPDATE users
-        SET
+        UPDATE users SET
           name=?,
           username=?,
           bio=?,
@@ -657,549 +584,190 @@ app.patch(
           show_following=?
         WHERE id=?
       `).run(
-        values.name,
-        values.username,
-        values.bio,
-        values.photo_url,
-        values.is_private,
-        values.allow_messages,
-        values.approve_followers,
-        values.show_followers,
-        values.show_following,
+        name,
+        username,
+        bio,
+        photoUrl,
+        isPrivate ? 1 : 0,
+        allowMessages ? 1 : 0,
+        approveFollowers ? 1 : 0,
+        showFollowers ? 1 : 0,
+        showFollowing ? 1 : 0,
         req.userId
       );
 
-      const updated =
-        db.prepare(
-          'SELECT * FROM users WHERE id=?'
-        ).get(
-          req.userId
-        );
-
-      return res.json({
-        user:
-          publicUser(updated)
+      res.json({
+        user: publicUser(
+          db
+            .prepare(
+              'SELECT * FROM users WHERE id=?'
+            )
+            .get(req.userId)
+        )
       });
 
-    } catch (error) {
+    } catch (e) {
       console.error(
         'Profile update error:',
-        error
+        e
       );
 
-      return res.status(409).json({
+      res.status(500).json({
         error:
-          'Username may already be in use'
+          'Could not update profile'
       });
     }
   }
 );
 
-/* =========================================================
-   GET USER
-========================================================= */
+/* =========================
+   MEDIA UPLOAD
+========================= */
 
-app.get(
-  '/api/users/:username',
-  auth,
-  (req, res) => {
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE username=?'
-      ).get(
-        req.params.username
-          .toLowerCase()
-      );
+/*
+  IMPORTANT:
 
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
+  The browser does NOT upload directly
+  to Cloudinary.
 
-    const followers =
-      db.prepare(`
-        SELECT COUNT(*) n
-        FROM follows
-        WHERE following_id=?
-        AND status='accepted'
-      `).get(
-        user.id
-      ).n;
+  Browser
+      ↓
+  /api/uploads
+      ↓
+  Render backend
+      ↓
+  Cloudinary
+      ↓
+  URL returned to browser
 
-    const following =
-      db.prepare(`
-        SELECT COUNT(*) n
-        FROM follows
-        WHERE follower_id=?
-        AND status='accepted'
-      `).get(
-        user.id
-      ).n;
-
-    return res.json({
-      user: {
-        ...publicUser(user),
-        followers,
-        following
-      }
-    });
-  }
-);
-
-/* =========================================================
-   FOLLOW
-========================================================= */
-
-app.post(
-  '/api/users/:id/follow',
-  auth,
-  (req, res) => {
-    const target =
-      Number(
-        req.params.id
-      );
-
-    if (
-      !Number.isInteger(
-        target
-      )
-    ) {
-      return res.status(400).json({
-        error:
-          'Invalid user ID'
-      });
-    }
-
-    if (
-      target ===
-      req.userId
-    ) {
-      return res.status(400).json({
-        error:
-          'You cannot follow yourself'
-      });
-    }
-
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE id=?'
-      ).get(
-        target
-      );
-
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
-
-    const status =
-      user.approve_followers
-        ? 'pending'
-        : 'accepted';
-
-    db.prepare(`
-      INSERT INTO follows(
-        follower_id,
-        following_id,
-        status
-      )
-      VALUES(?,?,?)
-      ON CONFLICT(
-        follower_id,
-        following_id
-      )
-      DO UPDATE SET
-        status=excluded.status
-    `).run(
-      req.userId,
-      target,
-      status
-    );
-
-    return res.json({
-      status
-    });
-  }
-);
-
-app.delete(
-  '/api/users/:id/follow',
-  auth,
-  (req, res) => {
-    db.prepare(`
-      DELETE FROM follows
-      WHERE follower_id=?
-      AND following_id=?
-    `).run(
-      req.userId,
-      Number(
-        req.params.id
-      )
-    );
-
-    return res.json({
-      ok: true
-    });
-  }
-);
-
-/* =========================================================
-   FOLLOWERS
-========================================================= */
-
-app.get(
-  '/api/users/:id/followers',
-  auth,
-  (req, res) => {
-    const id =
-      Number(
-        req.params.id
-      );
-
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE id=?'
-      ).get(
-        id
-      );
-
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
-
-    if (
-      user.is_private &&
-      id !== req.userId &&
-      !user.show_followers
-    ) {
-      return res.status(403).json({
-        error:
-          'Followers list is private'
-      });
-    }
-
-    const rows =
-      db.prepare(`
-        SELECT u.*
-        FROM users u
-        JOIN follows f
-          ON f.follower_id=u.id
-        WHERE f.following_id=?
-        AND f.status='accepted'
-        ORDER BY f.created_at DESC
-      `).all(
-        id
-      );
-
-    return res.json({
-      users:
-        rows.map(
-          publicUser
-        )
-    });
-  }
-);
-
-/* =========================================================
-   FOLLOWING
-========================================================= */
-
-app.get(
-  '/api/users/:id/following',
-  auth,
-  (req, res) => {
-    const id =
-      Number(
-        req.params.id
-      );
-
-    const user =
-      db.prepare(
-        'SELECT * FROM users WHERE id=?'
-      ).get(
-        id
-      );
-
-    if (!user) {
-      return res.status(404).json({
-        error:
-          'User not found'
-      });
-    }
-
-    if (
-      user.is_private &&
-      id !== req.userId &&
-      !user.show_following
-    ) {
-      return res.status(403).json({
-        error:
-          'Following list is private'
-      });
-    }
-
-    const rows =
-      db.prepare(`
-        SELECT u.*
-        FROM users u
-        JOIN follows f
-          ON f.following_id=u.id
-        WHERE f.follower_id=?
-        AND f.status='accepted'
-        ORDER BY f.created_at DESC
-      `).all(
-        id
-      );
-
-    return res.json({
-      users:
-        rows.map(
-          publicUser
-        )
-    });
-  }
-);
-
-/* =========================================================
-   CLOUDINARY UPLOAD
-========================================================= */
+  This avoids the client-side
+  "Invalid signature" problem.
+*/
 
 app.post(
   '/api/uploads',
   auth,
-  upload.single('file'),
+  (req, res) => {
+    upload.single('file')(
+      req,
+      res,
+      async (err) => {
 
-  async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({
-          error:
-            'No file provided'
-        });
-      }
+        if (err) {
+          console.error(
+            'Upload middleware error:',
+            err
+          );
 
-      const cloudName =
-        process.env
-          .CLOUDINARY_CLOUD_NAME;
+          return res.status(400).json({
+            error:
+              err.message ||
+              'Invalid upload'
+          });
+        }
 
-      const apiKey =
-        process.env
-          .CLOUDINARY_API_KEY;
+        if (!req.file) {
+          return res.status(400).json({
+            error:
+              'No file uploaded'
+          });
+        }
 
-      const apiSecret =
-        process.env
-          .CLOUDINARY_API_SECRET;
-
-      if (
-        !cloudName ||
-        !apiKey ||
-        !apiSecret
-      ) {
-        console.error(
-          'Cloudinary environment variables are missing'
-        );
-
-        return res.status(500).json({
-          error:
-            'Cloudinary is not configured on the server'
-        });
-      }
-
-      const mimeType =
-        String(
-          req.file.mimetype ||
-            ''
-        ).toLowerCase();
-
-      const resourceType =
-        mimeType.startsWith(
-          'video/'
-        )
-          ? 'video'
-          : 'image';
-
-      console.log(
-        `Uploading ${resourceType}: ${req.file.originalname} (${req.file.size} bytes)`
-      );
-
-      const result =
-        await new Promise(
-          (
-            resolve,
-            reject
-          ) => {
-            const stream =
-              cloudinary
-                .uploader
-                .upload_stream(
-                  {
-                    folder:
-                      'in2u',
-
-                    resource_type:
-                      resourceType
-                  },
-
-                  (
-                    error,
-                    uploadResult
-                  ) => {
-                    if (error) {
-                      return reject(
-                        error
-                      );
-                    }
-
-                    resolve(
-                      uploadResult
-                    );
-                  }
-                );
-
-            stream.end(
-              req.file.buffer
+        try {
+          const result =
+            await uploadBuffer(
+              req.file.buffer,
+              req.file.mimetype
             );
-          }
-        );
 
-      console.log(
-        'Cloudinary upload successful:',
-        result.secure_url
-      );
+          res.json(result);
 
-      return res.status(201).json({
-        ok: true,
+        } catch (e) {
+          console.error(
+            'Media upload failed:',
+            e
+          );
 
-        url:
-          result.secure_url,
-
-        public_id:
-          result.public_id,
-
-        resourceType:
-          result.resource_type,
-
-        resource_type:
-          result.resource_type,
-
-        format:
-          result.format,
-
-        bytes:
-          result.bytes
-      });
-
-    } catch (error) {
-      console.error(
-        'Cloudinary upload error:',
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          error?.message ||
-          'Media upload failed'
-      });
-    }
+          res.status(502).json({
+            error:
+              e.message ||
+              'Media upload failed'
+          });
+        }
+      }
+    );
   }
 );
 
-/* =========================================================
+/*
+  Old endpoint.
+
+  This makes sure an outdated frontend
+  gets a clear message instead of trying
+  to use an old upload flow.
+*/
+
+app.post(
+  '/api/upload',
+  auth,
+  (req, res) => {
+    res.status(410).json({
+      error:
+        'Old upload endpoint. Refresh the In2U website so it uses /api/uploads.'
+    });
+  }
+);
+
+/* =========================
    CREATE POST
-========================================================= */
+========================= */
 
 app.post(
   '/api/posts',
   auth,
   (req, res) => {
-    const caption =
-      String(
-        req.body?.caption ||
-          ''
+    try {
+      const caption = String(
+        req.body?.caption || ''
       );
 
-    const media =
-      Array.isArray(
-        req.body?.media
-      )
-        ? req.body.media
-        : [];
+      const media =
+        Array.isArray(
+          req.body?.media
+        )
+          ? req.body.media
+              .filter(
+                x =>
+                  typeof x === 'string' &&
+                  /^https?:\/\//i.test(x)
+              )
+              .slice(0, 10)
+          : [];
 
-    try {
-      const tx =
-        db.transaction(
-          () => {
-            const post =
-              db.prepare(`
-                INSERT INTO posts(
-                  user_id,
-                  caption
-                )
-                VALUES(?,?)
-              `).run(
-                req.userId,
-                caption
-              );
-
-            const addMedia =
-              db.prepare(`
-                INSERT INTO post_media(
-                  post_id,
-                  url,
-                  sort_order
-                )
-                VALUES(?,?,?)
-              `);
-
-            media
-              .slice(0, 5)
-              .forEach(
-                (
-                  url,
-                  index
-                ) => {
-                  if (url) {
-                    addMedia.run(
-                      post.lastInsertRowid,
-                      String(url),
-                      index
-                    );
-                  }
-                }
-              );
-
-            return Number(
-              post.lastInsertRowid
-            );
-          }
+      const info = db
+        .prepare(
+          `INSERT INTO posts
+           (user_id,caption,media_json)
+           VALUES(?,?,?)`
+        )
+        .run(
+          req.userId,
+          caption,
+          JSON.stringify(media)
         );
 
-      const postId =
-        tx();
-
-      return res.status(201).json({
-        post:
-          db.prepare(
-            'SELECT * FROM posts WHERE id=?'
-          ).get(
-            postId
-          )
+      res.json({
+        ok: true,
+        id: info.lastInsertRowid
       });
 
-    } catch (error) {
+    } catch (e) {
       console.error(
-        'Create post error:',
-        error
+        'Post creation error:',
+        e
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           'Could not create post'
       });
@@ -1207,438 +775,425 @@ app.post(
   }
 );
 
-/* =========================================================
+/* =========================
+   POST FORMAT
+========================= */
+
+function decoratePost(p) {
+
+  const reactions = db
+    .prepare(
+      `SELECT emoji,COUNT(*) n
+       FROM reactions
+       WHERE post_id=?
+       GROUP BY emoji`
+    )
+    .all(p.id);
+
+  const reactionUsers = {};
+
+  for (
+    const r of db
+      .prepare(`
+        SELECT
+          r.emoji,
+          u.name,
+          u.username,
+          u.photo_url
+        FROM reactions r
+        JOIN users u
+          ON u.id=r.user_id
+        WHERE r.post_id=?
+        ORDER BY r.id DESC
+      `)
+      .all(p.id)
+  ) {
+    (
+      reactionUsers[r.emoji] ||=
+        []
+    ).push({
+      name: r.name,
+      handle:
+        '@' + r.username,
+      photo:
+        r.photo_url || ''
+    });
+  }
+
+  const comments =
+    db.prepare(`
+      SELECT
+        c.*,
+        u.name,
+        u.username
+      FROM comments c
+      JOIN users u
+        ON u.id=c.user_id
+      WHERE c.post_id=?
+      ORDER BY c.id ASC
+    `).all(p.id);
+
+  return {
+    id: p.id,
+    name: p.name,
+    username: p.username,
+    photo:
+      p.photo_url || '',
+    caption:
+      p.caption || '',
+    media:
+      JSON.parse(
+        p.media_json || '[]'
+      ),
+    created_at:
+      p.created_at,
+
+    reactions:
+      Object.fromEntries(
+        reactions.map(
+          x => [
+            x.emoji,
+            x.n
+          ]
+        )
+      ),
+
+    reactionUsers,
+
+    comments:
+      comments.map(
+        c => ({
+          id: c.id,
+          user: c.name,
+          text: c.text,
+          parentId:
+            c.parent_id,
+          replies: []
+        })
+      )
+  };
+}
+
+/* =========================
    FEED
-========================================================= */
+========================= */
 
 app.get(
   '/api/feed',
   auth,
   (req, res) => {
-    const rows =
-      db.prepare(`
+
+    const posts = db
+      .prepare(`
         SELECT
-          p.id,
-          p.caption,
-          p.created_at,
-          u.id user_id,
+          p.*,
           u.name,
           u.username,
           u.photo_url
         FROM posts p
         JOIN users u
           ON u.id=p.user_id
-        ORDER BY p.created_at DESC
+        ORDER BY p.id DESC
         LIMIT 100
-      `).all();
+      `)
+      .all();
 
-    const media =
-      db.prepare(`
-        SELECT
-          post_id,
-          url
-        FROM post_media
-        ORDER BY sort_order
-      `).all();
-
-    const mediaMap = {};
-
-    for (
-      const item of media
-    ) {
-      (
-        mediaMap[
-          item.post_id
-        ] ??= []
-      ).push(
-        item.url
-      );
-    }
-
-    const reactions =
-      db.prepare(`
-        SELECT
-          post_id,
-          user_id,
-          emoji
-        FROM reactions
-        ORDER BY created_at
-      `).all();
-
-    const reactionMap = {};
-
-    for (
-      const reaction of reactions
-    ) {
-      const entry =
-        reactionMap[
-          reaction.post_id
-        ] ??= {
-          counts: {},
-          users: {}
-        };
-
-      entry.counts[
-        reaction.emoji
-      ] =
-        (
-          entry.counts[
-            reaction.emoji
-          ] || 0
-        ) + 1;
-
-      (
-        entry.users[
-          reaction.emoji
-        ] ??= []
-      ).push(
-        Number(
-          reaction.user_id
+    res.json({
+      posts:
+        posts.map(
+          decoratePost
         )
-      );
-    }
-
-    const comments =
-      db.prepare(`
-        SELECT
-          c.id,
-          c.post_id,
-          c.user_id,
-          c.parent_id,
-          c.text,
-          c.created_at,
-          u.name,
-          u.username,
-          u.photo_url
-        FROM comments c
-        JOIN users u
-          ON u.id=c.user_id
-        ORDER BY c.created_at
-      `).all();
-
-    const commentMap = {};
-
-    for (
-      const comment of comments
-    ) {
-      (
-        commentMap[
-          comment.post_id
-        ] ??= []
-      ).push({
-        id:
-          comment.id,
-
-        user:
-          comment.name,
-
-        text:
-          comment.text,
-
-        reactions: {},
-
-        replies: [],
-
-        parentId:
-          comment.parent_id
-      });
-    }
-
-    for (
-      const post of rows
-    ) {
-      const list =
-        commentMap[
-          post.id
-        ] || [];
-
-      const byId =
-        Object.fromEntries(
-          list.map(
-            comment => [
-              comment.id,
-              comment
-            ]
-          )
-        );
-
-      for (
-        const comment of list
-      ) {
-        if (
-          comment.parentId &&
-          byId[
-            comment.parentId
-          ]
-        ) {
-          byId[
-            comment.parentId
-          ]
-            .replies
-            .push(
-              comment
-            );
-        }
-      }
-
-      commentMap[
-        post.id
-      ] =
-        list
-          .filter(
-            comment =>
-              !comment.parentId
-          )
-          .map(
-            comment => {
-              delete comment.parentId;
-              return comment;
-            }
-          );
-    }
-
-    const posts =
-      rows.map(
-        post => {
-          const reaction =
-            reactionMap[
-              post.id
-            ] || {
-              counts: {},
-              users: {}
-            };
-
-          const reactionUsers =
-            Object.fromEntries(
-              Object.entries(
-                reaction.users
-              ).map(
-                (
-                  [
-                    emoji,
-                    ids
-                  ]
-                ) => [
-                  emoji,
-
-                  ids.map(
-                    id => {
-                      const user =
-                        db.prepare(`
-                          SELECT
-                            name,
-                            username,
-                            photo_url
-                          FROM users
-                          WHERE id=?
-                        `).get(
-                          id
-                        );
-
-                      return {
-                        name:
-                          user?.name ||
-                          'User',
-
-                        handle:
-                          '@' +
-                          (
-                            user?.username ||
-                            'user'
-                          ),
-
-                        photo:
-                          user?.photo_url ||
-                          ''
-                      };
-                    }
-                  )
-                ]
-              )
-            );
-
-          return {
-            ...post,
-
-            media:
-              mediaMap[
-                post.id
-              ] || [],
-
-            reactions:
-              reaction.counts,
-
-            reactionUsers,
-
-            comments:
-              commentMap[
-                post.id
-              ] || []
-          };
-        }
-      );
-
-    return res.json({
-      posts
     });
   }
 );
 
-/* =========================================================
+/* =========================
    REACTIONS
-========================================================= */
+========================= */
 
 app.post(
   '/api/posts/:id/reactions',
   auth,
   (req, res) => {
-    const emoji =
-      String(
-        req.body?.emoji ||
+    try {
+
+      const postId =
+        Number(
+          req.params.id
+        );
+
+      const emoji =
+        String(
+          req.body?.emoji ||
           '❤️'
+        );
+
+      db.prepare(`
+        INSERT OR IGNORE
+        INTO reactions
+        (post_id,user_id,emoji)
+        VALUES(?,?,?)
+      `).run(
+        postId,
+        req.userId,
+        emoji
       );
 
-    db.prepare(`
-      INSERT INTO reactions(
-        user_id,
-        post_id,
-        emoji
-      )
-      VALUES(?,?,?)
-      ON CONFLICT(
-        user_id,
-        post_id
-      )
-      DO UPDATE SET
-        emoji=excluded.emoji
-    `).run(
-      req.userId,
-      Number(
-        req.params.id
-      ),
-      emoji
-    );
+      res.json({
+        ok: true
+      });
 
-    return res.json({
-      ok: true
-    });
+    } catch (e) {
+
+      res.status(500).json({
+        error:
+          'Could not add reaction'
+      });
+    }
   }
 );
 
-/* =========================================================
+/* =========================
    COMMENTS
-========================================================= */
+========================= */
 
 app.post(
   '/api/posts/:id/comments',
   auth,
   (req, res) => {
-    const text =
-      String(
-        req.body?.text ||
-          ''
-      ).trim();
+    try {
 
-    if (!text) {
-      return res.status(400).json({
-        error:
-          'Comment is required'
-      });
-    }
+      const text =
+        String(
+          req.body?.text || ''
+        ).trim();
 
-    const parentId =
-      req.body?.parentId ===
-        undefined ||
-      req.body?.parentId ===
-        null ||
-      req.body?.parentId ===
-        ''
-        ? null
-        : Number(
-            req.body.parentId
-          );
+      const parentId =
+        req.body?.parentId == null
+          ? null
+          : Number(
+              req.body.parentId
+            );
 
-    const info =
+      if (!text) {
+        return res.status(400).json({
+          error:
+            'Comment cannot be empty'
+        });
+      }
+
       db.prepare(`
-        INSERT INTO comments(
-          post_id,
-          user_id,
-          parent_id,
-          text
-        )
+        INSERT INTO comments
+        (post_id,user_id,text,parent_id)
         VALUES(?,?,?,?)
       `).run(
         Number(
           req.params.id
         ),
-
         req.userId,
-
-        parentId,
-
-        text
+        text,
+        parentId
       );
 
-    return res.status(201).json({
-      id:
+      res.json({
+        ok: true
+      });
+
+    } catch (e) {
+
+      res.status(500).json({
+        error:
+          'Could not add comment'
+      });
+    }
+  }
+);
+
+/* =========================
+   FOLLOWERS
+========================= */
+
+app.get(
+  '/api/users/:id/followers',
+  auth,
+  (req, res) => {
+
+    const users =
+      db.prepare(`
+        SELECT u.*
+        FROM follows f
+        JOIN users u
+          ON u.id=f.follower_id
+        WHERE
+          f.following_id=?
+          AND f.status='accepted'
+      `).all(
         Number(
-          info.lastInsertRowid
+          req.params.id
+        )
+      );
+
+    res.json({
+      users:
+        users.map(
+          publicUser
         )
     });
   }
 );
 
-/* =========================================================
-   ERROR HANDLER
-========================================================= */
+/* =========================
+   FOLLOWING
+========================= */
 
-app.use(
-  (
-    err,
-    req,
-    res,
-    next
-  ) => {
-    console.error(
-      'Server error:',
-      err
-    );
+app.get(
+  '/api/users/:id/following',
+  auth,
+  (req, res) => {
 
-    if (
-      res.headersSent
-    ) {
-      return next(err);
-    }
+    const users =
+      db.prepare(`
+        SELECT u.*
+        FROM follows f
+        JOIN users u
+          ON u.id=f.following_id
+        WHERE
+          f.follower_id=?
+          AND f.status='accepted'
+      `).all(
+        Number(
+          req.params.id
+        )
+      );
 
-    if (
-      err?.code ===
-      'LIMIT_FILE_SIZE'
-    ) {
-      return res.status(413).json({
+    res.json({
+      users:
+        users.map(
+          publicUser
+        )
+    });
+  }
+);
+
+/* =========================
+   FIND USER
+========================= */
+
+app.get(
+  '/api/users/:username',
+  auth,
+  (req, res) => {
+
+    const username =
+      String(
+        req.params.username
+      )
+        .replace(/^@/, '')
+        .toLowerCase();
+
+    const user =
+      db.prepare(
+        'SELECT * FROM users WHERE username=?'
+      ).get(username);
+
+    if (!user) {
+      return res.status(404).json({
         error:
-          'File is too large. Maximum size is 100MB.'
+          'User not found'
       });
     }
 
-    return res.status(
-      err.status || 500
-    ).json({
+    res.json({
+      user:
+        publicUser(user)
+    });
+  }
+);
+
+/* =========================
+   FOLLOW USER
+========================= */
+
+app.post(
+  '/api/users/:id/follow',
+  auth,
+  (req, res) => {
+
+    const id =
+      Number(
+        req.params.id
+      );
+
+    if (id === req.userId) {
+      return res.status(400).json({
+        error:
+          'You cannot follow yourself'
+      });
+    }
+
+    const target =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(id);
+
+    if (!target) {
+      return res.status(404).json({
+        error:
+          'User not found'
+      });
+    }
+
+    const status =
+      target.approve_followers
+        ? 'pending'
+        : 'accepted';
+
+    db.prepare(`
+      INSERT INTO follows
+      (follower_id,following_id,status)
+      VALUES(?,?,?)
+
+      ON CONFLICT(
+        follower_id,
+        following_id
+      )
+
+      DO UPDATE SET
+        status=excluded.status
+    `).run(
+      req.userId,
+      id,
+      status
+    );
+
+    res.json({
+      status
+    });
+  }
+);
+
+/* =========================
+   ERROR HANDLER
+========================= */
+
+app.use(
+  (err, req, res, next) => {
+
+    console.error(
+      'Unhandled server error:',
+      err
+    );
+
+    res.status(500).json({
       error:
-        err.message ||
         'Server error'
     });
   }
 );
 
-/* =========================================================
+/* =========================
    START SERVER
-========================================================= */
-
-const PORT =
-  Number(
-    process.env.PORT ||
-      3000
-  );
+========================= */
 
 app.listen(
   PORT,
