@@ -8,54 +8,142 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { v2 as cloudinary } from 'cloudinary';
+import multer from 'multer';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
-const db = new Database(path.join(__dirname, 'in2u.db'));
+
+const db = new Database(
+  path.join(__dirname, 'in2u.db')
+);
 
 db.pragma('foreign_keys = ON');
 
-const schemaPath = path.join(__dirname, 'schema.sql');
-const schemaSql = await readFile(schemaPath, 'utf8');
+const schemaPath = path.join(
+  __dirname,
+  'schema.sql'
+);
+
+const schemaSql = await readFile(
+  schemaPath,
+  'utf8'
+);
 
 if (typeof schemaSql !== 'string') {
-  throw new Error('schema.sql could not be read as text');
+  throw new Error(
+    'schema.sql could not be read as text'
+  );
 }
 
 db.exec(schemaSql);
 
-const configuredOrigins = String(process.env.CORS_ORIGIN || '*')
+/* =========================================================
+   CORS
+========================================================= */
+
+const configuredOrigins = String(
+  process.env.CORS_ORIGIN || '*'
+)
   .split(',')
   .map(x => x.trim())
   .filter(Boolean);
 
-app.use(cors({
-  origin(origin, callback) {
-    if (
-      !origin ||
-      configuredOrigins.includes('*') ||
-      configuredOrigins.includes(origin)
-    ) {
-      return callback(null, true);
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (
+        !origin ||
+        configuredOrigins.includes('*') ||
+        configuredOrigins.includes(origin)
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(
+        new Error('Origin not allowed by CORS')
+      );
+    },
+
+    credentials: false,
+
+    methods: [
+      'GET',
+      'POST',
+      'PATCH',
+      'DELETE',
+      'OPTIONS'
+    ],
+
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization'
+    ]
+  })
+);
+
+/* =========================================================
+   BODY PARSERS
+========================================================= */
+
+app.use(
+  express.json({
+    limit: '40mb'
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true
+  })
+);
+
+/* =========================================================
+   MULTER
+   Handles multipart/form-data uploads from index.html
+========================================================= */
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+
+  limits: {
+    fileSize: 100 * 1024 * 1024
+  },
+
+  fileFilter(req, file, cb) {
+    const type = String(
+      file.mimetype || ''
+    ).toLowerCase();
+
+    const allowed =
+      type.startsWith('image/') ||
+      type.startsWith('video/');
+
+    if (!allowed) {
+      return cb(
+        new Error(
+          'Only image and video files are allowed'
+        )
+      );
     }
 
-    return callback(new Error('Origin not allowed by CORS'));
-  },
-  credentials: false,
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+    cb(null, true);
+  }
+});
 
-app.use(express.json({ limit: '40mb' }));
-app.use(express.urlencoded({ extended: true }));
+/* =========================================================
+   AUTH
+========================================================= */
 
 const JWT_SECRET =
-  process.env.JWT_SECRET || 'dev-only-change-this-secret';
+  process.env.JWT_SECRET ||
+  'dev-only-change-this-secret';
 
 const publicUser = u => ({
   id: u.id,
@@ -73,15 +161,20 @@ const publicUser = u => ({
 
 function tokenFor(u) {
   return jwt.sign(
-    { sub: u.id },
+    {
+      sub: u.id
+    },
     JWT_SECRET,
-    { expiresIn: '30d' }
+    {
+      expiresIn: '30d'
+    }
   );
 }
 
 function auth(req, res, next) {
   try {
-    const h = req.headers.authorization || '';
+    const h =
+      req.headers.authorization || '';
 
     if (!h.startsWith('Bearer ')) {
       return res.status(401).json({
@@ -89,12 +182,15 @@ function auth(req, res, next) {
       });
     }
 
-    req.userId = jwt.verify(
+    const decoded = jwt.verify(
       h.slice(7),
       JWT_SECRET
-    ).sub;
+    );
+
+    req.userId = decoded.sub;
 
     next();
+
   } catch {
     return res.status(401).json({
       error: 'Invalid or expired token'
@@ -102,650 +198,927 @@ function auth(req, res, next) {
   }
 }
 
-app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    service: 'In2U backend',
-    time: new Date().toISOString()
-  });
-});
+/* =========================================================
+   HEALTH
+========================================================= */
 
-app.post('/api/auth/signup', async (req, res) => {
-  const {
-    name,
-    email,
-    password,
-    username
-  } = req.body || {};
-
-  if (!name || !email || !password) {
-    return res.status(400).json({
-      error: 'Name, email and password are required'
+app.get(
+  '/api/health',
+  (req, res) => {
+    res.json({
+      ok: true,
+      service: 'In2U backend',
+      time: new Date().toISOString()
     });
   }
+);
 
-  if (password.length < 8) {
-    return res.status(400).json({
-      error: 'Password must be at least 8 characters'
-    });
+/* =========================================================
+   SIGN UP
+========================================================= */
+
+app.post(
+  '/api/auth/signup',
+  async (req, res) => {
+    const {
+      name,
+      email,
+      password,
+      username
+    } = req.body || {};
+
+    if (
+      !name ||
+      !email ||
+      !password
+    ) {
+      return res.status(400).json({
+        error:
+          'Name, email and password are required'
+      });
+    }
+
+    if (String(password).length < 8) {
+      return res.status(400).json({
+        error:
+          'Password must be at least 8 characters'
+      });
+    }
+
+    const cleanEmail =
+      String(email)
+        .trim()
+        .toLowerCase();
+
+    const cleanUsername =
+      String(username || name)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, '')
+        .slice(0, 30) ||
+      `user${Date.now()}`;
+
+    try {
+      const hash =
+        await bcrypt.hash(
+          password,
+          12
+        );
+
+      const info =
+        db.prepare(`
+          INSERT INTO users(
+            name,
+            username,
+            email,
+            password_hash
+          )
+          VALUES(?,?,?,?)
+        `).run(
+          String(name).trim(),
+          cleanUsername,
+          cleanEmail,
+          hash
+        );
+
+      const u =
+        db.prepare(
+          'SELECT * FROM users WHERE id=?'
+        ).get(
+          info.lastInsertRowid
+        );
+
+      res.status(201).json({
+        token: tokenFor(u),
+        user: publicUser(u)
+      });
+
+    } catch (e) {
+      res.status(409).json({
+        error:
+          e.message.includes(
+            'users.email'
+          )
+            ? 'Email already in use'
+            : e.message.includes(
+                'users.username'
+              )
+              ? 'Username already in use'
+              : 'Account could not be created'
+      });
+    }
   }
+);
 
-  const cleanEmail = String(email)
-    .trim()
-    .toLowerCase();
+/* =========================================================
+   LOGIN
+========================================================= */
 
-  const cleanUsername =
-    String(username || name)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_]/g, '')
-      .slice(0, 30) ||
-    `user${Date.now()}`;
+app.post(
+  '/api/auth/login',
+  async (req, res) => {
+    const {
+      email,
+      password
+    } = req.body || {};
 
-  try {
-    const hash = await bcrypt.hash(password, 12);
-
-    const info = db
-      .prepare(
-        'INSERT INTO users(name,username,email,password_hash) VALUES(?,?,?,?)'
-      )
-      .run(
-        String(name).trim(),
-        cleanUsername,
-        cleanEmail,
-        hash
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE email=?'
+      ).get(
+        String(email || '')
+          .trim()
+          .toLowerCase()
       );
 
-    const u = db
-      .prepare('SELECT * FROM users WHERE id=?')
-      .get(info.lastInsertRowid);
+    if (
+      !u ||
+      !(await bcrypt.compare(
+        String(password || ''),
+        u.password_hash
+      ))
+    ) {
+      return res.status(401).json({
+        error:
+          'Invalid email or password'
+      });
+    }
 
-    res.status(201).json({
+    res.json({
       token: tokenFor(u),
       user: publicUser(u)
     });
-  } catch (e) {
-    res.status(409).json({
-      error:
-        e.message.includes('users.email')
-          ? 'Email already in use'
-          : e.message.includes('users.username')
-            ? 'Username already in use'
-            : 'Account could not be created'
+  }
+);
+
+/* =========================================================
+   CURRENT USER
+========================================================= */
+
+app.get(
+  '/api/me',
+  auth,
+  (req, res) => {
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(
+        req.userId
+      );
+
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
+
+    res.json({
+      user: publicUser(u)
     });
   }
-});
+);
 
-app.post('/api/auth/login', async (req, res) => {
-  const {
-    email,
-    password
-  } = req.body || {};
+/* =========================================================
+   UPDATE CURRENT USER
+========================================================= */
 
-  const u = db
-    .prepare('SELECT * FROM users WHERE email=?')
-    .get(
-      String(email || '')
-        .trim()
-        .toLowerCase()
-    );
+app.patch(
+  '/api/me',
+  auth,
+  (req, res) => {
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(
+        req.userId
+      );
 
-  if (
-    !u ||
-    !(await bcrypt.compare(
-      String(password || ''),
-      u.password_hash
-    ))
-  ) {
-    return res.status(401).json({
-      error: 'Invalid email or password'
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
+
+    const b =
+      req.body || {};
+
+    const vals = {
+      name:
+        b.name ?? u.name,
+
+      username:
+        b.username ?? u.username,
+
+      bio:
+        b.bio ?? u.bio,
+
+      photo_url:
+        b.photoUrl ?? u.photo_url,
+
+      is_private:
+        b.isPrivate === undefined
+          ? u.is_private
+          : +!!b.isPrivate,
+
+      allow_messages:
+        b.allowMessages === undefined
+          ? u.allow_messages
+          : +!!b.allowMessages,
+
+      approve_followers:
+        b.approveFollowers === undefined
+          ? u.approve_followers
+          : +!!b.approveFollowers,
+
+      show_followers:
+        b.showFollowers === undefined
+          ? u.show_followers
+          : +!!b.showFollowers,
+
+      show_following:
+        b.showFollowing === undefined
+          ? u.show_following
+          : +!!b.showFollowing
+    };
+
+    try {
+      db.prepare(`
+        UPDATE users
+        SET
+          name=?,
+          username=?,
+          bio=?,
+          photo_url=?,
+          is_private=?,
+          allow_messages=?,
+          approve_followers=?,
+          show_followers=?,
+          show_following=?
+        WHERE id=?
+      `).run(
+        vals.name,
+        vals.username,
+        vals.bio,
+        vals.photo_url,
+        vals.is_private,
+        vals.allow_messages,
+        vals.approve_followers,
+        vals.show_followers,
+        vals.show_following,
+        req.userId
+      );
+
+      res.json({
+        user: publicUser(
+          db.prepare(
+            'SELECT * FROM users WHERE id=?'
+          ).get(
+            req.userId
+          )
+        )
+      });
+
+    } catch {
+      res.status(409).json({
+        error:
+          'Username may already be in use'
+      });
+    }
+  }
+);
+
+/* =========================================================
+   GET USER
+========================================================= */
+
+app.get(
+  '/api/users/:username',
+  auth,
+  (req, res) => {
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE username=?'
+      ).get(
+        req.params.username.toLowerCase()
+      );
+
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
+
+    const followers =
+      db.prepare(`
+        SELECT COUNT(*) n
+        FROM follows
+        WHERE following_id=?
+        AND status='accepted'
+      `).get(u.id).n;
+
+    const following =
+      db.prepare(`
+        SELECT COUNT(*) n
+        FROM follows
+        WHERE follower_id=?
+        AND status='accepted'
+      `).get(u.id).n;
+
+    res.json({
+      user: {
+        ...publicUser(u),
+        followers,
+        following
+      }
     });
   }
+);
 
-  res.json({
-    token: tokenFor(u),
-    user: publicUser(u)
-  });
-});
+/* =========================================================
+   FOLLOW
+========================================================= */
 
-app.get('/api/me', auth, (req, res) => {
-  const u = db
-    .prepare('SELECT * FROM users WHERE id=?')
-    .get(req.userId);
+app.post(
+  '/api/users/:id/follow',
+  auth,
+  (req, res) => {
+    const target =
+      Number(req.params.id);
 
-  res.json({
-    user: publicUser(u)
-  });
-});
+    if (target === req.userId) {
+      return res.status(400).json({
+        error:
+          'You cannot follow yourself'
+      });
+    }
 
-app.patch('/api/me', auth, (req, res) => {
-  const u = db
-    .prepare('SELECT * FROM users WHERE id=?')
-    .get(req.userId);
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(target);
 
-  if (!u) {
-    return res.status(404).json({
-      error: 'User not found'
-    });
-  }
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
 
-  const b = req.body || {};
+    const status =
+      u.approve_followers
+        ? 'pending'
+        : 'accepted';
 
-  const vals = {
-    name: b.name ?? u.name,
-    username: b.username ?? u.username,
-    bio: b.bio ?? u.bio,
-    photo_url: b.photoUrl ?? u.photo_url,
-
-    is_private:
-      b.isPrivate === undefined
-        ? u.is_private
-        : +!!b.isPrivate,
-
-    allow_messages:
-      b.allowMessages === undefined
-        ? u.allow_messages
-        : +!!b.allowMessages,
-
-    approve_followers:
-      b.approveFollowers === undefined
-        ? u.approve_followers
-        : +!!b.approveFollowers,
-
-    show_followers:
-      b.showFollowers === undefined
-        ? u.show_followers
-        : +!!b.showFollowers,
-
-    show_following:
-      b.showFollowing === undefined
-        ? u.show_following
-        : +!!b.showFollowing
-  };
-
-  try {
     db.prepare(`
-      UPDATE users
-      SET
-        name=?,
-        username=?,
-        bio=?,
-        photo_url=?,
-        is_private=?,
-        allow_messages=?,
-        approve_followers=?,
-        show_followers=?,
-        show_following=?
-      WHERE id=?
+      INSERT INTO follows(
+        follower_id,
+        following_id,
+        status
+      )
+      VALUES(?,?,?)
+      ON CONFLICT(
+        follower_id,
+        following_id
+      )
+      DO UPDATE SET
+        status=excluded.status
     `).run(
-      vals.name,
-      vals.username,
-      vals.bio,
-      vals.photo_url,
-      vals.is_private,
-      vals.allow_messages,
-      vals.approve_followers,
-      vals.show_followers,
-      vals.show_following,
-      req.userId
+      req.userId,
+      target,
+      status
     );
 
     res.json({
-      user: publicUser(
-        db
-          .prepare('SELECT * FROM users WHERE id=?')
-          .get(req.userId)
-      )
-    });
-  } catch {
-    res.status(409).json({
-      error: 'Username may already be in use'
-    });
-  }
-});
-
-app.get('/api/users/:username', auth, (req, res) => {
-  const u = db
-    .prepare('SELECT * FROM users WHERE username=?')
-    .get(req.params.username.toLowerCase());
-
-  if (!u) {
-    return res.status(404).json({
-      error: 'User not found'
-    });
-  }
-
-  const followers = db
-    .prepare(`
-      SELECT COUNT(*) n
-      FROM follows
-      WHERE following_id=?
-      AND status='accepted'
-    `)
-    .get(u.id).n;
-
-  const following = db
-    .prepare(`
-      SELECT COUNT(*) n
-      FROM follows
-      WHERE follower_id=?
-      AND status='accepted'
-    `)
-    .get(u.id).n;
-
-  res.json({
-    user: {
-      ...publicUser(u),
-      followers,
-      following
-    }
-  });
-});
-
-app.post('/api/users/:id/follow', auth, (req, res) => {
-  const target = Number(req.params.id);
-
-  if (target === req.userId) {
-    return res.status(400).json({
-      error: 'You cannot follow yourself'
-    });
-  }
-
-  const u = db
-    .prepare('SELECT * FROM users WHERE id=?')
-    .get(target);
-
-  if (!u) {
-    return res.status(404).json({
-      error: 'User not found'
-    });
-  }
-
-  const status = u.approve_followers
-    ? 'pending'
-    : 'accepted';
-
-  db.prepare(`
-    INSERT INTO follows(
-      follower_id,
-      following_id,
       status
-    )
-    VALUES(?,?,?)
-    ON CONFLICT(follower_id,following_id)
-    DO UPDATE SET status=excluded.status
-  `).run(
-    req.userId,
-    target,
-    status
-  );
-
-  res.json({ status });
-});
-
-app.delete('/api/users/:id/follow', auth, (req, res) => {
-  db.prepare(`
-    DELETE FROM follows
-    WHERE follower_id=?
-    AND following_id=?
-  `).run(
-    req.userId,
-    Number(req.params.id)
-  );
-
-  res.json({ ok: true });
-});
-
-app.get('/api/users/:id/followers', auth, (req, res) => {
-  const u = db
-    .prepare('SELECT * FROM users WHERE id=?')
-    .get(Number(req.params.id));
-
-  if (!u) {
-    return res.status(404).json({
-      error: 'User not found'
     });
   }
+);
 
-  if (
-    u.is_private &&
-    Number(req.params.id) !== req.userId &&
-    !u.show_followers
-  ) {
-    return res.status(403).json({
-      error: 'Followers list is private'
+app.delete(
+  '/api/users/:id/follow',
+  auth,
+  (req, res) => {
+    db.prepare(`
+      DELETE FROM follows
+      WHERE follower_id=?
+      AND following_id=?
+    `).run(
+      req.userId,
+      Number(req.params.id)
+    );
+
+    res.json({
+      ok: true
     });
   }
+);
 
-  const rows = db
-    .prepare(`
-      SELECT u.*
-      FROM users u
-      JOIN follows f
-        ON f.follower_id=u.id
-      WHERE f.following_id=?
-      AND f.status='accepted'
-      ORDER BY f.created_at DESC
-    `)
-    .all(u.id);
+/* =========================================================
+   FOLLOWERS
+========================================================= */
 
-  res.json({
-    users: rows.map(publicUser)
-  });
-});
-
-app.get('/api/users/:id/following', auth, (req, res) => {
-  const u = db
-    .prepare('SELECT * FROM users WHERE id=?')
-    .get(Number(req.params.id));
-
-  if (!u) {
-    return res.status(404).json({
-      error: 'User not found'
-    });
-  }
-
-  if (
-    u.is_private &&
-    Number(req.params.id) !== req.userId &&
-    !u.show_following
-  ) {
-    return res.status(403).json({
-      error: 'Following list is private'
-    });
-  }
-
-  const rows = db
-    .prepare(`
-      SELECT u.*
-      FROM users u
-      JOIN follows f
-        ON f.following_id=u.id
-      WHERE f.follower_id=?
-      AND f.status='accepted'
-      ORDER BY f.created_at DESC
-    `)
-    .all(u.id);
-
-  res.json({
-    users: rows.map(publicUser)
-  });
-});
-
-app.post('/api/posts', auth, (req, res) => {
-  const {
-    caption = '',
-    media = []
-  } = req.body || {};
-
-  const tx = db.transaction(() => {
-    const p = db
-      .prepare(
-        'INSERT INTO posts(user_id,caption) VALUES(?,?)'
-      )
-      .run(
-        req.userId,
-        String(caption)
+app.get(
+  '/api/users/:id/followers',
+  auth,
+  (req, res) => {
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(
+        Number(req.params.id)
       );
 
-    const add = db.prepare(`
-      INSERT INTO post_media(
-        post_id,
-        url,
-        sort_order
-      )
-      VALUES(?,?,?)
-    `);
-
-    (Array.isArray(media) ? media : [])
-      .slice(0, 5)
-      .forEach((url, i) => {
-        add.run(
-          p.lastInsertRowid,
-          String(url),
-          i
-        );
-      });
-
-    return p.lastInsertRowid;
-  });
-
-  const id = tx();
-
-  res.status(201).json({
-    post: db
-      .prepare('SELECT * FROM posts WHERE id=?')
-      .get(id)
-  });
-});
-
-app.get('/api/feed', auth, (req, res) => {
-  app.post('/api/upload', auth, async (req, res) => {
-  try {
-    const {
-      file,
-      resource_type = 'auto'
-    } = req.body || {};
-
-    if (!file) {
-      return res.status(400).json({
-        error: 'No file provided'
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
       });
     }
 
     if (
-      typeof file !== 'string' ||
-      !file.startsWith('data:')
+      u.is_private &&
+      Number(req.params.id) !== req.userId &&
+      !u.show_followers
     ) {
-      return res.status(400).json({
-        error: 'Invalid file format'
+      return res.status(403).json({
+        error:
+          'Followers list is private'
       });
     }
 
-    const allowedTypes = [
-      'image',
-      'video',
-      'auto'
-    ];
+    const rows =
+      db.prepare(`
+        SELECT u.*
+        FROM users u
+        JOIN follows f
+          ON f.follower_id=u.id
+        WHERE f.following_id=?
+        AND f.status='accepted'
+        ORDER BY f.created_at DESC
+      `).all(u.id);
 
-    if (!allowedTypes.includes(resource_type)) {
-      return res.status(400).json({
-        error: 'Invalid resource type'
-      });
-    }
-
-    const result =
-      await cloudinary.uploader.upload(file, {
-        folder: 'in2u',
-        resource_type
-      });
-
-    return res.status(201).json({
-      ok: true,
-      url: result.secure_url,
-      public_id: result.public_id,
-      resource_type: result.resource_type,
-      format: result.format,
-      bytes: result.bytes
-    });
-
-  } catch (error) {
-    console.error(
-      'Cloudinary upload error:',
-      error
-    );
-
-    return res.status(500).json({
-      error:
-        error?.message ||
-        'Media upload failed'
+    res.json({
+      users:
+        rows.map(publicUser)
     });
   }
-});
-  const rows = db
-    .prepare(`
-      SELECT
-        p.id,
-        p.caption,
-        p.created_at,
-        u.id user_id,
-        u.name,
-        u.username,
-        u.photo_url
-      FROM posts p
-      JOIN users u
-        ON u.id=p.user_id
-      ORDER BY p.created_at DESC
-      LIMIT 100
-    `)
-    .all();
+);
 
-  const media = db
-    .prepare(`
-      SELECT post_id,url
-      FROM post_media
-      ORDER BY sort_order
-    `)
-    .all();
+/* =========================================================
+   FOLLOWING
+========================================================= */
 
-  const map = {};
-
-  for (const m of media) {
-    (map[m.post_id] ??= []).push(m.url);
-  }
-
-  const reactions = db
-    .prepare(`
-      SELECT post_id,user_id,emoji
-      FROM reactions
-      ORDER BY created_at
-    `)
-    .all();
-
-  const reactionMap = {};
-
-  for (const r of reactions) {
-    const x =
-      reactionMap[r.post_id] ??= {
-        counts: {},
-        users: {}
-      };
-
-    x.counts[r.emoji] =
-      (x.counts[r.emoji] || 0) + 1;
-
-    (x.users[r.emoji] ??= [])
-      .push(r.user_id);
-  }
-
-  const comments = db
-    .prepare(`
-      SELECT
-        c.id,
-        c.post_id,
-        c.user_id,
-        c.parent_id,
-        c.text,
-        c.created_at,
-        u.name,
-        u.username,
-        u.photo_url
-      FROM comments c
-      JOIN users u
-        ON u.id=c.user_id
-      ORDER BY c.created_at
-    `)
-    .all();
-
-  const commentMap = {};
-
-  for (const c of comments) {
-    (commentMap[c.post_id] ??= []).push({
-      id: c.id,
-      user: c.name,
-      text: c.text,
-      reactions: {},
-      replies: [],
-      parentId: c.parent_id
-    });
-  }
-
-  for (const p of rows) {
-    const arr = commentMap[p.id] || [];
-
-    const byId = Object.fromEntries(
-      arr.map(c => [c.id, c])
-    );
-
-    for (const c of arr) {
-      if (
-        c.parentId &&
-        byId[c.parentId]
-      ) {
-        byId[c.parentId]
-          .replies
-          .push(c);
-      }
-    }
-
-    commentMap[p.id] =
-      arr
-        .filter(c => !c.parentId)
-        .map(c => {
-          delete c.parentId;
-          return c;
-        });
-  }
-
-  const posts = rows.map(p => {
-    const r =
-      reactionMap[p.id] || {
-        counts: {},
-        users: {}
-      };
-
-    const reactionUsers =
-      Object.fromEntries(
-        Object.entries(r.users).map(
-          ([e, ids]) => [
-            e,
-            ids.map(id => {
-              const u = db
-                .prepare(`
-                  SELECT
-                    name,
-                    username,
-                    photo_url
-                  FROM users
-                  WHERE id=?
-                `)
-                .get(id);
-
-              return {
-                name: u?.name || 'User',
-                handle:
-                  '@' +
-                  (u?.username || 'user'),
-                photo:
-                  u?.photo_url || ''
-              };
-            })
-          ]
-        )
+app.get(
+  '/api/users/:id/following',
+  auth,
+  (req, res) => {
+    const u =
+      db.prepare(
+        'SELECT * FROM users WHERE id=?'
+      ).get(
+        Number(req.params.id)
       );
 
-    return {
-      ...p,
-      media: map[p.id] || [],
-      reactions: r.counts,
-      reactionUsers,
-      comments:
-        commentMap[p.id] || []
-    };
-  });
+    if (!u) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
 
-  res.json({ posts });
-});
+    if (
+      u.is_private &&
+      Number(req.params.id) !== req.userId &&
+      !u.show_following
+    ) {
+      return res.status(403).json({
+        error:
+          'Following list is private'
+      });
+    }
+
+    const rows =
+      db.prepare(`
+        SELECT u.*
+        FROM users u
+        JOIN follows f
+          ON f.following_id=u.id
+        WHERE f.follower_id=?
+        AND f.status='accepted'
+        ORDER BY f.created_at DESC
+      `).all(u.id);
+
+    res.json({
+      users:
+        rows.map(publicUser)
+    });
+  }
+);
+
+/* =========================================================
+   CLOUDINARY MEDIA UPLOAD
+   IMPORTANT:
+   Frontend sends:
+   POST /api/uploads
+   multipart/form-data
+   field name = file
+========================================================= */
+
+app.post(
+  '/api/uploads',
+  auth,
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'No file provided'
+        });
+      }
+
+      const mimeType =
+        String(
+          req.file.mimetype || ''
+        ).toLowerCase();
+
+      const isVideo =
+        mimeType.startsWith(
+          'video/'
+        );
+
+      const resourceType =
+        isVideo
+          ? 'video'
+          : 'image';
+
+      if (
+        !process.env.CLOUDINARY_CLOUD_NAME ||
+        !process.env.CLOUDINARY_API_KEY ||
+        !process.env.CLOUDINARY_API_SECRET
+      ) {
+        console.error(
+          'Cloudinary environment variables are missing'
+        );
+
+        return res.status(500).json({
+          error:
+            'Cloudinary is not configured on the server'
+        });
+      }
+
+      console.log(
+        `Uploading ${resourceType}:`,
+        req.file.originalname,
+        req.file.size,
+        'bytes'
+      );
+
+      const result =
+        await new Promise(
+          (resolve, reject) => {
+            const stream =
+              cloudinary.uploader.upload_stream(
+                {
+                  folder: 'in2u',
+                  resource_type:
+                    resourceType
+                },
+                (
+                  error,
+                  uploadResult
+                ) => {
+                  if (error) {
+                    return reject(
+                      error
+                    );
+                  }
+
+                  resolve(
+                    uploadResult
+                  );
+                }
+              );
+
+            stream.end(
+              req.file.buffer
+            );
+          }
+        );
+
+      console.log(
+        'Cloudinary upload successful:',
+        result.secure_url
+      );
+
+      return res.status(201).json({
+        ok: true,
+
+        url:
+          result.secure_url,
+
+        public_id:
+          result.public_id,
+
+        resourceType:
+          result.resource_type,
+
+        resource_type:
+          result.resource_type,
+
+        format:
+          result.format,
+
+        bytes:
+          result.bytes
+      });
+
+    } catch (error) {
+      console.error(
+        'Cloudinary upload error:',
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          error?.message ||
+          'Media upload failed'
+      });
+    }
+  }
+);
+
+/* =========================================================
+   CREATE POST
+========================================================= */
+
+app.post(
+  '/api/posts',
+  auth,
+  (req, res) => {
+    const {
+      caption = '',
+      media = []
+    } = req.body || {};
+
+    const tx =
+      db.transaction(() => {
+        const p =
+          db.prepare(`
+            INSERT INTO posts(
+              user_id,
+              caption
+            )
+            VALUES(?,?)
+          `).run(
+            req.userId,
+            String(caption)
+          );
+
+        const add =
+          db.prepare(`
+            INSERT INTO post_media(
+              post_id,
+              url,
+              sort_order
+            )
+            VALUES(?,?,?)
+          `);
+
+        (
+          Array.isArray(media)
+            ? media
+            : []
+        )
+          .slice(0, 5)
+          .forEach(
+            (url, i) => {
+              add.run(
+                p.lastInsertRowid,
+                String(url),
+                i
+              );
+            }
+          );
+
+        return p.lastInsertRowid;
+      });
+
+    const id = tx();
+
+    res.status(201).json({
+      post:
+        db.prepare(
+          'SELECT * FROM posts WHERE id=?'
+        ).get(id)
+    });
+  }
+);
+
+/* =========================================================
+   FEED
+========================================================= */
+
+app.get(
+  '/api/feed',
+  auth,
+  (req, res) => {
+    const rows =
+      db.prepare(`
+        SELECT
+          p.id,
+          p.caption,
+          p.created_at,
+          u.id user_id,
+          u.name,
+          u.username,
+          u.photo_url
+        FROM posts p
+        JOIN users u
+          ON u.id=p.user_id
+        ORDER BY p.created_at DESC
+        LIMIT 100
+      `).all();
+
+    const media =
+      db.prepare(`
+        SELECT
+          post_id,
+          url
+        FROM post_media
+        ORDER BY sort_order
+      `).all();
+
+    const map = {};
+
+    for (const m of media) {
+      (
+        map[m.post_id] ??= []
+      ).push(m.url);
+    }
+
+    const reactions =
+      db.prepare(`
+        SELECT
+          post_id,
+          user_id,
+          emoji
+        FROM reactions
+        ORDER BY created_at
+      `).all();
+
+    const reactionMap = {};
+
+    for (const r of reactions) {
+      const x =
+        reactionMap[r.post_id] ??= {
+          counts: {},
+          users: {}
+        };
+
+      x.counts[r.emoji] =
+        (x.counts[r.emoji] || 0) + 1;
+
+      (
+        x.users[r.emoji] ??= []
+      ).push(r.user_id);
+    }
+
+    const comments =
+      db.prepare(`
+        SELECT
+          c.id,
+          c.post_id,
+          c.user_id,
+          c.parent_id,
+          c.text,
+          c.created_at,
+          u.name,
+          u.username,
+          u.photo_url
+        FROM comments c
+        JOIN users u
+          ON u.id=c.user_id
+        ORDER BY c.created_at
+      `).all();
+
+    const commentMap = {};
+
+    for (const c of comments) {
+      (
+        commentMap[c.post_id] ??= []
+      ).push({
+        id: c.id,
+        user: c.name,
+        text: c.text,
+        reactions: {},
+        replies: [],
+        parentId: c.parent_id
+      });
+    }
+
+    for (const p of rows) {
+      const arr =
+        commentMap[p.id] || [];
+
+      const byId =
+        Object.fromEntries(
+          arr.map(
+            c => [c.id, c]
+          )
+        );
+
+      for (const c of arr) {
+        if (
+          c.parentId &&
+          byId[c.parentId]
+        ) {
+          byId[c.parentId]
+            .replies
+            .push(c);
+        }
+      }
+
+      commentMap[p.id] =
+        arr
+          .filter(
+            c => !c.parentId
+          )
+          .map(c => {
+            delete c.parentId;
+            return c;
+          });
+    }
+
+    const posts =
+      rows.map(p => {
+        const r =
+          reactionMap[p.id] || {
+            counts: {},
+            users: {}
+          };
+
+        const reactionUsers =
+          Object.fromEntries(
+            Object.entries(
+              r.users
+            ).map(
+              ([e, ids]) => [
+                e,
+                ids.map(id => {
+                  const u =
+                    db.prepare(`
+                      SELECT
+                        name,
+                        username,
+                        photo_url
+                      FROM users
+                      WHERE id=?
+                    `).get(id);
+
+                  return {
+                    name:
+                      u?.name ||
+                      'User',
+
+                    handle:
+                      '@' +
+                      (
+                        u?.username ||
+                        'user'
+                      ),
+
+                    photo:
+                      u?.photo_url ||
+                      ''
+                  };
+                })
+              ]
+            )
+          );
+
+        return {
+          ...p,
+
+          media:
+            map[p.id] || [],
+
+          reactions:
+            r.counts,
+
+          reactionUsers,
+
+          comments:
+            commentMap[p.id] ||
+            []
+        };
+      });
+
+    res.json({
+      posts
+    });
+  }
+);
+
+/* =========================================================
+   REACTIONS
+========================================================= */
 
 app.post(
   '/api/posts/:id/reactions',
@@ -753,7 +1126,8 @@ app.post(
   (req, res) => {
     const emoji =
       String(
-        req.body?.emoji || '❤️'
+        req.body?.emoji ||
+        '❤️'
       );
 
     db.prepare(`
@@ -763,17 +1137,27 @@ app.post(
         emoji
       )
       VALUES(?,?,?)
-      ON CONFLICT(user_id,post_id)
-      DO UPDATE SET emoji=excluded.emoji
+      ON CONFLICT(
+        user_id,
+        post_id
+      )
+      DO UPDATE SET
+        emoji=excluded.emoji
     `).run(
       req.userId,
       Number(req.params.id),
       emoji
     );
 
-    res.json({ ok: true });
+    res.json({
+      ok: true
+    });
   }
 );
+
+/* =========================================================
+   COMMENTS
+========================================================= */
 
 app.post(
   '/api/posts/:id/comments',
@@ -781,17 +1165,19 @@ app.post(
   (req, res) => {
     const text =
       String(
-        req.body?.text || ''
+        req.body?.text ||
+        ''
       ).trim();
 
     if (!text) {
       return res.status(400).json({
-        error: 'Comment is required'
+        error:
+          'Comment is required'
       });
     }
 
-    const info = db
-      .prepare(`
+    const info =
+      db.prepare(`
         INSERT INTO comments(
           post_id,
           user_id,
@@ -799,39 +1185,69 @@ app.post(
           text
         )
         VALUES(?,?,?,?)
-      `)
-      .run(
+      `).run(
         Number(req.params.id),
         req.userId,
-        req.body?.parentId || null,
+        req.body?.parentId ||
+          null,
         text
       );
 
     res.status(201).json({
-      id: info.lastInsertRowid
+      id:
+        info.lastInsertRowid
     });
   }
 );
 
-app.use((err, req, res, next) => {
-  console.error(err);
+/* =========================================================
+   MULTER / GENERAL ERROR HANDLER
+========================================================= */
 
-  if (res.headersSent) {
-    return next(err);
+app.use(
+  (err, req, res, next) => {
+    console.error(
+      'Server error:',
+      err
+    );
+
+    if (res.headersSent) {
+      return next(err);
+    }
+
+    if (
+      err?.code ===
+      'LIMIT_FILE_SIZE'
+    ) {
+      return res.status(413).json({
+        error:
+          'File is too large. Maximum size is 100MB.'
+      });
+    }
+
+    return res.status(
+      err.status || 500
+    ).json({
+      error:
+        err.message ||
+        'Server error'
+    });
   }
+);
 
-  res.status(err.status || 500).json({
-    error: err.message || 'Server error'
-  });
-});
+/* =========================================================
+   START SERVER
+========================================================= */
+
+const PORT =
+  process.env.PORT || 3000;
 
 app.listen(
-  process.env.PORT || 3000,
+  PORT,
   '0.0.0.0',
-  () =>
+  () => {
     console.log(
-      `In2U backend running on port ${
-        process.env.PORT || 3000
-      }`
-    )
+      `In2U backend running on port ${PORT}`
+    );
+  }
 );
